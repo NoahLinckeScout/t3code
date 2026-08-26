@@ -82,6 +82,16 @@ export type DelegationHandoff = typeof DelegationHandoff.Type;
 
 export const DelegationHandoffFromJson = Schema.fromJsonString(DelegationHandoff);
 
+/**
+ * What gets recorded in place of a handoff when a delegation is failed by the
+ * staleness sweep. Distinguishable from a real handoff by shape, so a reader
+ * can never mistake "nobody reported" for "someone reported nothing".
+ */
+export const AbandonedRecord = Schema.Struct({
+  abandoned: TrimmedNonEmptyString,
+});
+export const AbandonedRecordFromJson = Schema.fromJsonString(AbandonedRecord);
+
 export const SpawnInput = Schema.Struct({
   role: TrimmedNonEmptyString.annotate({
     description:
@@ -133,9 +143,17 @@ export const SpawnResult = Schema.Struct({
   replayed: Schema.Boolean,
 });
 
-export const HandoffInput = Schema.Struct({
-  handoff: DelegationHandoff,
-});
+/**
+ * Flat on purpose, and identical in fields to {@link DelegationHandoff}.
+ *
+ * This was `{ handoff: { ... } }` until a live GLM child failed 23 consecutive
+ * calls against it. The model composed the right content every time and could
+ * not close two levels of braces: every attempt came back
+ * `JSON Parse error: Expected '}'`, and it started stripping quotes out of its
+ * own evidence strings trying to appease the parser. One nesting level is a
+ * real cost to a small model, paid on the one call that must not fail.
+ */
+export const HandoffInput = DelegationHandoff;
 
 export const HandoffResult = Schema.Struct({
   delegationId: DelegationId,
@@ -143,9 +161,20 @@ export const HandoffResult = Schema.Struct({
   parentThreadId: ThreadId,
 });
 
+/**
+ * Addressed by delegation, never by raw thread.
+ *
+ * A free-form `toThreadId` would let any thread reach any other, which is both a
+ * second path to something the HTTP dispatch API already does for operators and
+ * an authority this tool should not hold. Restricting the address space to the
+ * delegation graph means a thread can only message something it has a recorded
+ * relationship with, and that relationship is what authorises the message.
+ */
 export const MessageInput = Schema.Struct({
-  toDelegationId: Schema.optional(DelegationId),
-  toThreadId: Schema.optional(ThreadId),
+  toDelegationId: DelegationId.annotate({
+    description:
+      "A delegation you started, or the one that spawned you. You cannot address an unrelated thread.",
+  }),
   body: TrimmedNonEmptyString.annotate({
     description: "The message. A brief, subject to the same size budget as a handoff.",
   }),
@@ -178,6 +207,13 @@ export const InboxMessage = Schema.Struct({
   createdAt: Schema.String,
 });
 
+export const StaleReason = Schema.Literals([
+  "child_turn_ended_without_handoff",
+  "never_started",
+  "overdue",
+  "no_progress",
+]);
+
 export const InboxDelegation = Schema.Struct({
   delegationId: DelegationId,
   state: DelegationState,
@@ -188,6 +224,9 @@ export const InboxDelegation = Schema.Struct({
   childThreadId: Schema.NullOr(ThreadId),
   resourceLease: Schema.NullOr(Schema.String),
   handoff: Schema.NullOr(DelegationHandoff),
+  /** Set when this delegation has stopped showing evidence of progress. */
+  staleReason: Schema.NullOr(StaleReason),
+  staleDetail: Schema.NullOr(Schema.String),
   updatedAt: Schema.String,
 });
 
@@ -195,6 +234,8 @@ export const InboxResult = Schema.Struct({
   messages: Schema.Array(InboxMessage),
   delegations: Schema.Array(InboxDelegation),
   newMessageCount: NonNegativeInt,
+  /** How many of your delegations have stopped showing evidence of progress. */
+  staleCount: NonNegativeInt,
 });
 
 export const OrchestrationToolkitErrorReason = Schema.Literals([

@@ -11,7 +11,12 @@
  * value — the same string means different things on two machines — so guessing
  * one would be guessing which vendor gets the work. Absent config fails closed.
  */
-import { ProviderInstanceId, ProviderInteractionMode, RuntimeMode } from "@t3tools/contracts";
+import {
+  ProviderInstanceId,
+  ProviderInteractionMode,
+  ProviderOptionSelections,
+  RuntimeMode,
+} from "@t3tools/contracts";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -28,6 +33,13 @@ export const ROLES_CONFIG_FILENAME = "orchestration-roles.json";
 export const RoleDefinition = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
   model: Schema.String,
+  /**
+   * Per-provider model options, in the same shape a thread's `modelSelection`
+   * carries. Some providers need one to route at all: an `opencode` thread
+   * selects its agent here (`{"id": "agent", "value": "build"}`), and a spawn
+   * that omits it does not get the provider's default so much as no choice.
+   */
+  options: Schema.optional(ProviderOptionSelections),
   runtimeMode: Schema.optional(RuntimeMode),
   interactionMode: Schema.optional(ProviderInteractionMode),
   enabled: Schema.optional(Schema.Boolean),
@@ -39,6 +51,12 @@ export const RoleDefinition = Schema.Struct({
    * so there is nothing to detect after the fact.
    */
   canSpawn: Schema.optional(Schema.Boolean),
+  /**
+   * Wall-clock budget for a delegation in this role. Advisory: passing it
+   * raises an alert rather than killing the child, because a slow model and a
+   * hung one look identical from here and only one of them should be cut off.
+   */
+  deadlineMinutes: Schema.optional(Schema.Int),
   /** Extra contract text appended to the child's opening brief. */
   instructions: Schema.optional(Schema.String),
 });
@@ -57,6 +75,8 @@ export interface ResolvedRole {
   readonly name: string;
   readonly providerInstanceId: ProviderInstanceId;
   readonly model: string;
+  readonly options: ProviderOptionSelections | undefined;
+  readonly deadlineMinutes: number | undefined;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
   readonly canSpawn: boolean;
@@ -131,6 +151,8 @@ const makeOrchestrationRoles = Effect.gen(function* () {
         name: roleName,
         providerInstanceId: definition.providerInstanceId,
         model: definition.model,
+        options: definition.options,
+        deadlineMinutes: definition.deadlineMinutes,
         runtimeMode: definition.runtimeMode ?? "full-access",
         interactionMode: definition.interactionMode ?? "default",
         canSpawn: definition.canSpawn ?? false,

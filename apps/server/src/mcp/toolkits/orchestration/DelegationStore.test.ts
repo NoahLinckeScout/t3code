@@ -35,6 +35,7 @@ const pending = (
   resourceLease: undefined,
   idempotencyKey: undefined,
   spawnCommandId: `delegation:${overrides.delegationId}:thread-create`,
+  deadlineAt: undefined,
   ...overrides,
 });
 

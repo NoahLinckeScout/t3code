@@ -85,7 +85,7 @@ const callHandoff = (threadId: ThreadId, value: DelegationHandoff) =>
   Effect.gen(function* () {
     const built = yield* OrchestrationToolkit;
     return yield* built
-      .handle("agent_handoff", { handoff: value })
+      .handle("agent_handoff", value)
       .pipe(
         Stream.unwrap,
         Stream.run(Sink.last()),
@@ -109,6 +109,7 @@ const startDelegation = (scope: string, childThreadId: ThreadId) =>
       resourceLease: undefined,
       idempotencyKey: undefined,
       spawnCommandId: `delegation:${delegationId}:thread-create`,
+      deadlineAt: undefined,
     });
     yield* store.markRunning(delegationId, childThreadId, 1);
     return delegationId;

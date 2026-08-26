@@ -7,9 +7,11 @@ import * as Schema from "effect/Schema";
 import { OrchestrationEngineService } from "../../../orchestration/Services/OrchestrationEngine.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { DelegationStore, type DelegationRow } from "./DelegationStore.ts";
+import { type StaleVerdict, classifyDelegation } from "./staleness.ts";
 import { OrchestrationRoles, type ResolvedRole } from "./roles.ts";
 import {
   type DelegationHandoff,
+  AbandonedRecordFromJson,
   DelegationHandoffFromJson,
   type DelegationId,
   DelegationId as DelegationIdSchema,
@@ -23,6 +25,7 @@ import { OrchestrationToolkit } from "./tools.ts";
 const isoNow = DateTime.now.pipe(Effect.map(DateTime.formatIso));
 
 const encodeHandoff = Schema.encodeEffect(DelegationHandoffFromJson);
+const encodeAbandoned = Schema.encodeEffect(AbandonedRecordFromJson);
 const decodeHandoff = Schema.decodeUnknownEffect(DelegationHandoffFromJson);
 
 const dispatchFailed = (operation: string) => (cause: unknown) =>
@@ -105,8 +108,79 @@ const appendActivity = Effect.fn("OrchestrationToolkit.appendActivity")(function
     .pipe(Effect.mapError(dispatchFailed("thread.activity.append")));
 });
 
+/**
+ * Finds delegations that have stopped making progress, and says so once.
+ *
+ * Runs on tool invocation rather than on a timer. A fork should not own a
+ * scheduler, and more importantly a timer-driven sweep is what invites the
+ * heartbeat mistake: something that runs on its own tends to acquire the habit
+ * of writing the freshness it is supposed to be measuring. This reads evidence
+ * from the child's projections, writes only terminal state and a one-shot alert,
+ * and touches nothing that feeds back into its own verdict.
+ *
+ * The cost is honest and worth stating: if no thread ever calls a tool, nothing
+ * sweeps. What that buys is that a stale delegation is never *hidden* — the
+ * verdict is derived on every read, so it cannot be stale-but-looking-fresh.
+ */
+const sweepStaleDelegations = Effect.fn("OrchestrationToolkit.sweepStaleDelegations")(function* () {
+  const store = yield* DelegationStore;
+  const now = yield* isoNow;
+  const live = yield* store.listLiveWithProgress();
+
+  const verdicts: Array<{ readonly row: DelegationRow; readonly verdict: StaleVerdict }> = [];
+  for (const row of live) {
+    const verdict = classifyDelegation(
+      {
+        state: row.state,
+        childThreadId: row.childThreadId,
+        latestTurnState: row.latestTurnState,
+        lastActivityAt: row.lastActivityAt,
+        createdAt: row.createdAt,
+        deadlineAt: row.deadlineAt,
+      },
+      now,
+    );
+    if (verdict) verdicts.push({ row, verdict });
+  }
+
+  for (const { row, verdict } of verdicts) {
+    if (verdict.autoFail) {
+      const abandoned = yield* encodeAbandoned({ abandoned: verdict.detail }).pipe(Effect.orDie);
+      yield* store.markFailed(row.delegationId, abandoned);
+    }
+    const claimed = yield* store.markAlerted(row.delegationId);
+    if (!claimed) continue;
+
+    yield* store.enqueueMessage({
+      messageId: `stale:${row.delegationId}`,
+      fromThreadId: row.parentThreadId,
+      fromDelegationId: row.delegationId,
+      toThreadId: row.parentThreadId,
+      body: `Delegation ${row.delegationId} (${row.role}) stopped making progress: ${verdict.reason}. ${verdict.detail}`,
+    });
+    // Surfaces in the parent thread's timeline, so a human sees it without
+    // anyone calling agent_inbox.
+    yield* appendActivity({
+      threadId: row.parentThreadId,
+      tone: "error",
+      kind: "delegation.stalled",
+      summary: `${row.role} stalled: ${verdict.reason}`,
+      payload: {
+        delegationId: row.delegationId,
+        reason: verdict.reason,
+        detail: verdict.detail,
+        autoFailed: verdict.autoFail,
+        objective: row.objective,
+      },
+    });
+  }
+
+  return new Map(verdicts.map(({ row, verdict }) => [row.delegationId as string, verdict]));
+});
+
 const toInboxDelegation = Effect.fn("OrchestrationToolkit.toInboxDelegation")(function* (
   row: DelegationRow,
+  verdict?: StaleVerdict | undefined,
 ) {
   const handoff =
     row.handoffJson === null
@@ -126,6 +200,8 @@ const toInboxDelegation = Effect.fn("OrchestrationToolkit.toInboxDelegation")(fu
     childThreadId: row.childThreadId,
     resourceLease: row.resourceLease,
     handoff,
+    staleReason: verdict?.reason ?? null,
+    staleDetail: verdict?.detail ?? null,
     updatedAt: row.updatedAt,
   };
 });
@@ -183,6 +259,10 @@ const agent_spawn = Effect.fn("OrchestrationToolkit.agent_spawn")(function* (inp
 
   const role = yield* roles.resolve(input.role);
 
+  // Before contending for a lease, retire anything that has plainly stopped.
+  // A child that died holding a lease should not block its own replacement.
+  yield* sweepStaleDelegations();
+
   if (input.resourceLease !== undefined) {
     const holder = yield* store.findLiveByLease(input.resourceLease);
     if (holder) {
@@ -220,9 +300,19 @@ const agent_spawn = Effect.fn("OrchestrationToolkit.agent_spawn")(function* (inp
     resourceLease: input.resourceLease,
     idempotencyKey: input.idempotencyKey,
     spawnCommandId,
+    deadlineAt:
+      role.deadlineMinutes === undefined
+        ? undefined
+        : DateTime.formatIso(
+            DateTime.addDuration(yield* DateTime.now, `${role.deadlineMinutes} minutes`),
+          ),
   });
 
-  const modelSelection = { instanceId: role.providerInstanceId, model: role.model };
+  const modelSelection = {
+    instanceId: role.providerInstanceId,
+    model: role.model,
+    ...(role.options === undefined ? {} : { options: role.options }),
+  };
   const worktreePath = input.workdir ?? (yield* store.worktreePathOfThread(parentThreadId));
   const createdAt = yield* isoNow;
 
@@ -287,9 +377,9 @@ const agent_spawn = Effect.fn("OrchestrationToolkit.agent_spawn")(function* (inp
   };
 });
 
-const agent_handoff = Effect.fn("OrchestrationToolkit.agent_handoff")(function* (input: {
-  readonly handoff: DelegationHandoff;
-}) {
+const agent_handoff = Effect.fn("OrchestrationToolkit.agent_handoff")(function* (
+  handoff: DelegationHandoff,
+) {
   const invocation = yield* McpInvocationContext.McpInvocationContext;
   const store = yield* DelegationStore;
 
@@ -308,15 +398,14 @@ const agent_handoff = Effect.fn("OrchestrationToolkit.agent_handoff")(function* 
     });
   }
 
-  const unevidenced = handoffRejection(input.handoff);
+  const unevidenced = handoffRejection(handoff);
   if (unevidenced) return yield* unevidenced;
 
-  const handoffJson = yield* encodeHandoff(input.handoff).pipe(Effect.mapError(encodingFailed));
+  const handoffJson = yield* encodeHandoff(handoff).pipe(Effect.mapError(encodingFailed));
   const oversized = briefRejection(handoffJson, "handoff");
   if (oversized) return yield* oversized;
 
-  const state =
-    input.handoff.status === "completed" ? ("completed" as const) : ("blocked" as const);
+  const state = handoff.status === "completed" ? ("completed" as const) : ("blocked" as const);
   yield* store.markTerminal(delegation.delegationId, state, handoffJson);
 
   // The parent is told, but not interrupted. It reads this when it next looks.
@@ -325,7 +414,7 @@ const agent_handoff = Effect.fn("OrchestrationToolkit.agent_handoff")(function* 
     fromThreadId: invocation.threadId,
     fromDelegationId: delegation.delegationId,
     toThreadId: delegation.parentThreadId,
-    body: `Delegation ${delegation.delegationId} (${delegation.role}) reported ${state}: ${input.handoff.summary}`,
+    body: `Delegation ${delegation.delegationId} (${delegation.role}) reported ${state}: ${handoff.summary}`,
   });
 
   yield* appendActivity({
@@ -333,7 +422,7 @@ const agent_handoff = Effect.fn("OrchestrationToolkit.agent_handoff")(function* 
     tone: state === "completed" ? "info" : "error",
     kind: "delegation.handoff",
     summary: `${delegation.role} reported ${state}`,
-    payload: { delegationId: delegation.delegationId, handoff: input.handoff },
+    payload: { delegationId: delegation.delegationId, handoff },
   });
 
   return {
@@ -344,36 +433,41 @@ const agent_handoff = Effect.fn("OrchestrationToolkit.agent_handoff")(function* 
 });
 
 const agent_message = Effect.fn("OrchestrationToolkit.agent_message")(function* (input: {
-  readonly toDelegationId?: DelegationId | undefined;
-  readonly toThreadId?: ThreadId | undefined;
+  readonly toDelegationId: DelegationId;
   readonly body: string;
   readonly idempotencyKey: string;
 }) {
   const invocation = yield* McpInvocationContext.McpInvocationContext;
   const store = yield* DelegationStore;
 
-  if ((input.toDelegationId === undefined) === (input.toThreadId === undefined)) {
-    return yield* new OrchestrationToolkitError({
-      reason: "message_rejected",
-      detail: "Address the message with exactly one of toDelegationId or toThreadId.",
-    });
-  }
-
   const oversized = briefRejection(input.body, "message");
   if (oversized) return yield* oversized;
 
-  let target: ThreadId;
-  if (input.toDelegationId !== undefined) {
-    const delegation = yield* store.findById(input.toDelegationId);
-    if (!delegation?.childThreadId) {
-      return yield* new OrchestrationToolkitError({
-        reason: "delegation_not_found",
-        detail: `Delegation ${input.toDelegationId} has no thread to receive a message.`,
-      });
-    }
-    target = delegation.childThreadId;
-  } else {
-    target = input.toThreadId as ThreadId;
+  const delegation = yield* store.findById(input.toDelegationId);
+  if (!delegation) {
+    return yield* new OrchestrationToolkitError({
+      reason: "delegation_not_found",
+      detail: `Delegation ${input.toDelegationId} does not exist.`,
+    });
+  }
+
+  // Authority comes from the delegation relationship, not from knowing an id.
+  // A caller may address the child it started, or the parent that started it.
+  const isParent = delegation.parentThreadId === invocation.threadId;
+  const isChild = delegation.childThreadId === invocation.threadId;
+  if (!isParent && !isChild) {
+    return yield* new OrchestrationToolkitError({
+      reason: "message_rejected",
+      detail: `Delegation ${input.toDelegationId} is neither yours nor the one that spawned you. This tool only reaches along the delegation graph; an unrelated thread is not addressable.`,
+    });
+  }
+
+  const target = isParent ? delegation.childThreadId : delegation.parentThreadId;
+  if (target === null) {
+    return yield* new OrchestrationToolkitError({
+      reason: "delegation_not_found",
+      detail: `Delegation ${input.toDelegationId} has no thread to receive a message yet.`,
+    });
   }
 
   const senderDelegation = yield* store.findByChildThread(invocation.threadId);
@@ -405,8 +499,13 @@ const agent_inbox = Effect.fn("OrchestrationToolkit.agent_inbox")(function* (inp
   const undelivered = messages.filter((message) => message.deliveredAt === null);
   yield* store.markDelivered(undelivered.map((message) => message.messageId));
 
+  // Derive staleness before reading, so the answer is never "looks fine because
+  // nobody has checked recently".
+  const verdicts = yield* sweepStaleDelegations();
   const rows = yield* store.listByParent(invocation.threadId);
-  const delegations = yield* Effect.forEach(rows, toInboxDelegation);
+  const delegations = yield* Effect.forEach(rows, (row) =>
+    toInboxDelegation(row, verdicts.get(row.delegationId)),
+  );
 
   return {
     messages: messages.map((message) => ({
@@ -418,6 +517,7 @@ const agent_inbox = Effect.fn("OrchestrationToolkit.agent_inbox")(function* (inp
     })),
     delegations,
     newMessageCount: undelivered.length,
+    staleCount: delegations.filter((delegation) => delegation.staleReason !== null).length,
   };
 });
 

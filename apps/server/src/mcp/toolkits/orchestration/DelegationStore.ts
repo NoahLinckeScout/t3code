@@ -49,8 +49,16 @@ export interface DelegationRow {
   readonly spawnCommandId: string;
   readonly spawnSequence: number | null;
   readonly handoffJson: string | null;
+  readonly deadlineAt: string | null;
+  readonly alertedAt: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
+}
+
+/** A live delegation plus evidence read from the child's own projections. */
+export interface DelegationProgressRow extends DelegationRow {
+  readonly lastActivityAt: string | null;
+  readonly latestTurnState: string | null;
 }
 
 export interface InboxRow {
@@ -74,9 +82,22 @@ export interface InsertPendingInput {
   readonly resourceLease: string | undefined;
   readonly idempotencyKey: string | undefined;
   readonly spawnCommandId: string;
+  readonly deadlineAt: string | undefined;
 }
 
 export interface DelegationStoreShape {
+  readonly listLiveWithProgress: () => Effect.Effect<
+    ReadonlyArray<DelegationProgressRow>,
+    OrchestrationToolkitError
+  >;
+  readonly markFailed: (
+    delegationId: DelegationId,
+    abandonedJson: string,
+  ) => Effect.Effect<void, OrchestrationToolkitError>;
+  /** Returns true when this call is the one that claimed the alert. */
+  readonly markAlerted: (
+    delegationId: DelegationId,
+  ) => Effect.Effect<boolean, OrchestrationToolkitError>;
   readonly findById: (
     delegationId: DelegationId,
   ) => Effect.Effect<DelegationRow | undefined, OrchestrationToolkitError>;
@@ -165,6 +186,8 @@ const makeDelegationStore = Effect.gen(function* () {
         spawn_command_id TEXT NOT NULL UNIQUE,
         spawn_sequence INTEGER,
         handoff_json TEXT,
+        deadline_at TEXT,
+        alerted_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       )
@@ -207,6 +230,24 @@ const makeDelegationStore = Effect.gen(function* () {
     `,
   ]).pipe(Effect.mapError(storageFailed("DelegationStore.ensureSchema")));
 
+  // A database created before staleness tracking existed still has the table,
+  // so `CREATE TABLE IF NOT EXISTS` above is a no-op for it. Add the columns the
+  // same way the repo's own migrations do.
+  const existingColumns = yield* sql<{ readonly name: string }>`
+    PRAGMA table_info(orchestration_delegations)
+  `.pipe(Effect.mapError(storageFailed("DelegationStore.inspectColumns")));
+  const columnNames = new Set(existingColumns.map((column) => column.name));
+  if (!columnNames.has("deadline_at")) {
+    yield* sql`ALTER TABLE orchestration_delegations ADD COLUMN deadline_at TEXT`.pipe(
+      Effect.mapError(storageFailed("DelegationStore.addDeadlineColumn")),
+    );
+  }
+  if (!columnNames.has("alerted_at")) {
+    yield* sql`ALTER TABLE orchestration_delegations ADD COLUMN alerted_at TEXT`.pipe(
+      Effect.mapError(storageFailed("DelegationStore.addAlertedColumn")),
+    );
+  }
+
   const delegationColumns = sql`
     delegation_id AS "delegationId",
     parent_thread_id AS "parentThreadId",
@@ -222,6 +263,8 @@ const makeDelegationStore = Effect.gen(function* () {
     spawn_command_id AS "spawnCommandId",
     spawn_sequence AS "spawnSequence",
     handoff_json AS "handoffJson",
+    deadline_at AS "deadlineAt",
+    alerted_at AS "alertedAt",
     created_at AS "createdAt",
     updated_at AS "updatedAt"
   `;
@@ -299,6 +342,70 @@ const makeDelegationStore = Effect.gen(function* () {
     Effect.mapError(storageFailed("DelegationStore.listByParent")),
   );
 
+  /**
+   * Live delegations with the child's own progress evidence attached.
+   *
+   * Both evidence columns are subqueries over projections this toolkit does not
+   * own and never writes. That is the whole point: staleness cannot be refreshed
+   * by the code that checks for it.
+   */
+  const listLiveWithProgress: DelegationStoreShape["listLiveWithProgress"] = Effect.fn(
+    "DelegationStore.listLiveWithProgress",
+  )(
+    function* () {
+      return yield* sql<DelegationProgressRow>`
+        SELECT ${delegationColumns},
+          (
+            SELECT MAX(a.created_at) FROM projection_thread_activities a
+            WHERE a.thread_id = orchestration_delegations.child_thread_id
+          ) AS "lastActivityAt",
+          (
+            SELECT t.state FROM projection_turns t
+            WHERE t.thread_id = orchestration_delegations.child_thread_id
+            ORDER BY t.row_id DESC LIMIT 1
+          ) AS "latestTurnState"
+        FROM orchestration_delegations
+        WHERE state IN ('pending', 'running')
+        ORDER BY created_at ASC
+      `;
+    },
+    Effect.mapError(storageFailed("DelegationStore.listLiveWithProgress")),
+  );
+
+  const markFailed: DelegationStoreShape["markFailed"] = Effect.fn("DelegationStore.markFailed")(
+    function* (delegationId, abandonedJson) {
+      const now = yield* isoNow;
+      yield* sql`
+        UPDATE orchestration_delegations
+        SET state = 'failed',
+            handoff_json = ${abandonedJson},
+            updated_at = ${now}
+        WHERE delegation_id = ${delegationId} AND state IN ('pending', 'running')
+      `;
+    },
+    Effect.mapError(storageFailed("DelegationStore.markFailed")),
+  );
+
+  /**
+   * Records that a stale delegation has been reported once.
+   *
+   * Deliberately a one-shot stamp rather than a recurring notice: an alert that
+   * re-fires every sweep is the same noise as a heartbeat that never moves.
+   */
+  const markAlerted: DelegationStoreShape["markAlerted"] = Effect.fn("DelegationStore.markAlerted")(
+    function* (delegationId) {
+      const now = yield* isoNow;
+      const updated = yield* sql`
+        UPDATE orchestration_delegations
+        SET alerted_at = ${now}
+        WHERE delegation_id = ${delegationId} AND alerted_at IS NULL
+        RETURNING delegation_id AS "delegationId"
+      `;
+      return updated.length > 0;
+    },
+    Effect.mapError(storageFailed("DelegationStore.markAlerted")),
+  );
+
   const insertPending: DelegationStoreShape["insertPending"] = Effect.fn(
     "DelegationStore.insertPending",
   )(function* (input) {
@@ -307,12 +414,13 @@ const makeDelegationStore = Effect.gen(function* () {
       INSERT INTO orchestration_delegations (
         delegation_id, parent_thread_id, child_thread_id, role, provider_instance_id,
         model, state, objective, judgment, resource_lease, idempotency_key,
-        spawn_command_id, spawn_sequence, handoff_json, created_at, updated_at
+        spawn_command_id, spawn_sequence, handoff_json, deadline_at, alerted_at,
+        created_at, updated_at
       ) VALUES (
         ${input.delegationId}, ${input.parentThreadId}, NULL, ${input.role},
         ${input.providerInstanceId}, ${input.model}, 'pending', ${input.objective},
         ${input.judgment}, ${input.resourceLease ?? null}, ${input.idempotencyKey ?? null},
-        ${input.spawnCommandId}, NULL, NULL, ${now}, ${now}
+        ${input.spawnCommandId}, NULL, NULL, ${input.deadlineAt ?? null}, NULL, ${now}, ${now}
       )
     `.pipe(
       // The lease index is the concurrent-spawn guard, so a rejected insert is
@@ -459,6 +567,9 @@ const makeDelegationStore = Effect.gen(function* () {
   );
 
   return DelegationStore.of({
+    listLiveWithProgress,
+    markFailed,
+    markAlerted,
     findById,
     findByChildThread,
     findByIdempotencyKey,

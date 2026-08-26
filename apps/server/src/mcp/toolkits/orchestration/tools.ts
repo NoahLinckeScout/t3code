@@ -41,7 +41,7 @@ export const AgentSpawnTool = Tool.make("agent_spawn", {
 
 export const AgentHandoffTool = Tool.make("agent_handoff", {
   description:
-    "Report your terminal result to the parent that delegated to you. Call this exactly once, as your final action, and only if you were spawned by agent_spawn. A completed status must list the validation you actually ran; if you ran none, the honest status is blocked. Submit a brief that cites durable paths, never a transcript.",
+    "Report your terminal result to the parent that delegated to you. Call this exactly once, as your final action, and only if you were spawned by agent_spawn. Pass the six fields at the top level of the arguments object — status, summary, artifacts, validation, remainingRisks, nextStep — not wrapped in any outer key. A completed status must list the validation you actually ran; if you ran none, the honest status is blocked. Submit a brief that cites durable paths, never a transcript.",
   parameters: HandoffInput,
   success: HandoffResult,
   failure: OrchestrationToolkitError,
@@ -54,7 +54,7 @@ export const AgentHandoffTool = Tool.make("agent_handoff", {
 
 export const AgentMessageTool = Tool.make("agent_message", {
   description:
-    "Leave a durable message for another thread, addressed by delegationId or threadId. This never interrupts the recipient: it does not start a turn, steer a running one, or wake anything. The message waits until the recipient reads its inbox. Requires an idempotencyKey so a retry does not enqueue a second copy.",
+    "Leave a durable message along the delegation graph: the parent that spawned you, or a child you spawned, named by delegationId. You cannot address an unrelated thread. This never interrupts the recipient: it does not start a turn, steer a running one, or wake anything. The message waits until the recipient reads its inbox. Requires an idempotencyKey so a retry does not enqueue a second copy.",
   parameters: MessageInput,
   success: MessageResult,
   failure: OrchestrationToolkitError,
@@ -67,7 +67,7 @@ export const AgentMessageTool = Tool.make("agent_message", {
 
 export const AgentInboxTool = Tool.make("agent_inbox", {
   description:
-    "Read messages addressed to this thread and the current state of every delegation you started, including any handoffs your children have submitted. Reading marks messages delivered. This is how you learn a delegated result; nothing pushes it to you.",
+    "Read messages addressed to this thread and the current state of every delegation you started, including any handoffs your children have submitted and any that have stopped making progress (staleReason). Reading marks messages delivered. This is how you learn a delegated result; nothing pushes it to you.",
   parameters: InboxInput,
   success: InboxResult,
   failure: OrchestrationToolkitError,
