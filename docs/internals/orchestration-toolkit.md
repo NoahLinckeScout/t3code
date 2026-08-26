@@ -68,8 +68,10 @@ a read-then-write check, so concurrent spawns cannot both win.
 Self-hosted routes credit no prompt caching, so context spent early is re-sent on
 every later model call in the turn.
 
-**Tool parameters are flat. This is a rule, not a preference.**
-See _Flat parameters_ below; it is enforced by `flatParameters.test.ts`.
+**Tool parameters carry their required fields at the top level. This is a rule,
+not a preference, and it survived a model upgrade.** One top-level wrapper object
+is the failure; nesting below it is fine. See _Top-level parameters_ below; it is
+enforced by `flatParameters.test.ts`.
 
 **Messages travel the delegation graph, never to an arbitrary thread.**
 `agent_message` is addressed by `delegationId` and will only reach the parent
@@ -118,6 +120,18 @@ gap was only found by reading real `projection_threads` rows.
 
 `deadlineMinutes` is advisory — see _Deadlines and staleness_.
 
+### Changing which model a role uses
+
+No model or provider string appears anywhere in the toolkit's code; both are data
+on the role. Moving `implementer` from GLM 5.2 to 5.3-Flash is one edit here, and
+the file is re-read on every spawn, so it needs no restart either.
+
+One caveat that is easy to miss: the role names a `providerInstanceId`, and that
+instance has to actually serve the model. At time of writing the `opencode`
+instance enables `self-hosted-glm` and `self-hosted-kimi` only, so a 5.3 child
+needs a provider entry in OpenCode's own config first. The T3 Code side is
+config-only; the provider side is a separate file this toolkit does not own.
+
 ## Storage
 
 Two tables in the existing `state.sqlite`, created with `IF NOT EXISTS` when the
@@ -155,14 +169,42 @@ not assumed, since `layerConfig` is a `Layer.unwrap` and `setup` runs migrations
 If that line is ever dropped during a rebase, `server.test.ts` will fail to
 typecheck, which is the signal to restore it.
 
-## Flat parameters
+## Top-level parameters
 
-**Any tool in this toolkit takes a flat argument object. No parameter may be a
-nested object.** Arrays of scalars are fine. This applies to every tool added
-later, not just the ones here now.
+**Any tool in this toolkit must carry its required fields at the top level of
+`parameters`. One wrapper object around them is the failure.** Nesting _below_
+the top level is fine — an array of objects is a measured-good shape. This
+applies to every tool added later, not just the ones here now.
 
-The evidence. On the first live spawn, `agent_handoff` took
-`{ handoff: { ...six fields... } }`. A self-hosted GLM implementer failed **23
+### The measurement
+
+Same prompt, same tool, five runs each, the only variable being one level of
+top-level wrapping:
+
+| `parameters` shape                                           | GLM 5.2  | GLM 5.3-Flash |
+| ------------------------------------------------------------ | -------- | ------------- |
+| required fields at top level (including an array of objects) | —        | **5/5 valid** |
+| identical fields wrapped in one top-level object             | **0/23** | **3/5 valid** |
+
+Two things to take from this.
+
+**Upgrading the model does not remove the constraint.** 5.3-Flash is dramatically
+better and still fails roughly 40% of the time on the wrapped shape. Anyone
+tempted to relax this rule because the implementer got smarter should read the
+middle column and then the right-hand one.
+
+**The rule is narrower than "no nested objects."** An array of objects with their
+own required fields passed 5/5. Destructuring such an array into parallel scalar
+arrays would make tools meaningfully worse to use — `agent_handoff`'s validation
+entries being the obvious case — for no measured benefit. `flatParameters.test.ts`
+therefore inspects only top-level properties, and carries an explicit test
+asserting that an array of objects is permitted, so the rule cannot quietly be
+re-tightened.
+
+### The 5.2 anecdote, which is where this started
+
+On the first live spawn, `agent_handoff` took
+`{ handoff: { ...six fields... } }`. A self-hosted GLM 5.2 implementer failed **23
 consecutive calls** against it. Every failure was the same:
 
 ```
@@ -181,6 +223,20 @@ run. It never recovered and had to be interrupted.
 
 Flattening the parameters took the retry count from 23 to **0** on the next run,
 same model, same task, same prompt.
+
+### On 5.3-Flash the same fault is silent, which is worse
+
+5.2 failed loudly: a parse error the model could see and react to, even if it
+never recovered. The two 5.3-Flash failures emitted a **well-formed tool call
+with empty `{}` arguments**. Nothing raises. A model that calls a tool with no
+arguments is indistinguishable, from the outside, from a model that declined to
+call it at all — and the visible consequence is a delegation sitting `running`
+with no handoff.
+
+That is why the staleness sweep counts rejected handoff attempts and reports
+`handoff_attempted_but_rejected` as its own verdict. "Tried to report and the
+tool shape defeated it" and "never tried" need different responses, and without
+the count they are the same row.
 
 Why this is a rule and not a bug report: the intended shape of this system is a
 capable coordinator (Cursor, Grok) driving self-hosted implementers, because
@@ -216,12 +272,13 @@ The structural answer is in `staleness.ts`: **progress is read, never written.**
 
 Four verdicts, and only two act on their own:
 
-| Reason                             | Auto-fails | Why                                                                                                                                                              |
-| ---------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `child_turn_ended_without_handoff` | yes        | The child's turn is terminal and no handoff was accepted. It is not coming back; failing frees the lease and tells the parent something true. No clock involved. |
-| `never_started`                    | yes        | Recorded but never bound to a child thread, so the spawn crashed mid-write. The command id can be replayed.                                                      |
-| `overdue`                          | no         | Past its `deadlineMinutes` budget. A slow child and a hung one look identical from here, and only one of them should be cut off.                                 |
-| `no_progress`                      | no         | Nothing observable on the child thread for the stall window. Same caution.                                                                                       |
+| Reason                             | Auto-fails | Why                                                                                                                                                                                                                                                                                                                               |
+| ---------------------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `handoff_attempted_but_rejected`   | yes        | The child called the handoff tool, had its arguments rejected every time, and stopped. Reported separately because the fix differs: it tried, and the tool call defeated it. Counting rejected tool-call activities on the child thread is the only way the silent empty-arguments failure is distinguishable from never calling. |
+| `child_turn_ended_without_handoff` | yes        | The child's turn is terminal, no handoff was accepted, and no rejected attempt was recorded. It is not coming back; failing frees the lease and tells the parent something true. No clock involved.                                                                                                                               |
+| `never_started`                    | yes        | Recorded but never bound to a child thread, so the spawn crashed mid-write. The command id can be replayed.                                                                                                                                                                                                                       |
+| `overdue`                          | no         | Past its `deadlineMinutes` budget. A slow child and a hung one look identical from here, and only one of them should be cut off.                                                                                                                                                                                                  |
+| `no_progress`                      | no         | Nothing observable on the child thread for the stall window. Same caution.                                                                                                                                                                                                                                                        |
 
 The deterministic verdict is checked before any clock-based one, so a stalled
 delegation is reported for the reason that can be proven.

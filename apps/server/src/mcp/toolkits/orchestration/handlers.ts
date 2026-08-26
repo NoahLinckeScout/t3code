@@ -137,6 +137,7 @@ const sweepStaleDelegations = Effect.fn("OrchestrationToolkit.sweepStaleDelegati
         lastActivityAt: row.lastActivityAt,
         createdAt: row.createdAt,
         deadlineAt: row.deadlineAt,
+        rejectedHandoffAttempts: row.rejectedHandoffAttempts,
       },
       now,
     );

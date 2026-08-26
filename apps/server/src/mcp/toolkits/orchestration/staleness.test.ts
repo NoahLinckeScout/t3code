@@ -19,6 +19,7 @@ const progress = (overrides: Partial<DelegationProgress> = {}): DelegationProgre
   lastActivityAt: minutesAgo(1),
   createdAt: minutesAgo(5),
   deadlineAt: null,
+  rejectedHandoffAttempts: 0,
   ...overrides,
 });
 
@@ -43,6 +44,20 @@ describe("classifyDelegation", () => {
       assert.strictEqual(verdict?.autoFail, true);
     });
   }
+
+  it("distinguishes a rejected handoff attempt from never having tried", () => {
+    // The silent failure mode: a self-hosted implementer emits a well-formed
+    // call with empty arguments. Measured at roughly 2/5 on GLM 5.3-Flash for a
+    // top-level wrapper shape. Without counting the attempt this is
+    // indistinguishable from a child that simply stopped.
+    const verdict = classifyDelegation(
+      progress({ latestTurnState: "completed", rejectedHandoffAttempts: 3 }),
+      NOW,
+    );
+    assert.strictEqual(verdict?.reason, "handoff_attempted_but_rejected");
+    assert.strictEqual(verdict?.autoFail, true);
+    assert.match(verdict?.detail ?? "", /3 time\(s\)/);
+  });
 
   it("prefers the deterministic verdict over a timing one", () => {
     // Both conditions hold. The reported reason must be the provable one.
@@ -121,6 +136,7 @@ describe("classifyDelegation", () => {
       "deadlineAt",
       "lastActivityAt",
       "latestTurnState",
+      "rejectedHandoffAttempts",
       "state",
     ]);
   });

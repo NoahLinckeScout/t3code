@@ -59,6 +59,13 @@ export interface DelegationRow {
 export interface DelegationProgressRow extends DelegationRow {
   readonly lastActivityAt: string | null;
   readonly latestTurnState: string | null;
+  /**
+   * How many times the child called the handoff tool and had its arguments
+   * rejected. A self-hosted implementer can emit a well-formed call with empty
+   * arguments, which is indistinguishable from never calling at all unless the
+   * attempt is counted.
+   */
+  readonly rejectedHandoffAttempts: number;
 }
 
 export interface InboxRow {
@@ -363,7 +370,14 @@ const makeDelegationStore = Effect.gen(function* () {
             SELECT t.state FROM projection_turns t
             WHERE t.thread_id = orchestration_delegations.child_thread_id
             ORDER BY t.row_id DESC LIMIT 1
-          ) AS "latestTurnState"
+          ) AS "latestTurnState",
+          (
+            SELECT COUNT(*) FROM projection_thread_activities r
+            WHERE r.thread_id = orchestration_delegations.child_thread_id
+              AND r.kind LIKE 'tool.%'
+              AND r.payload_json LIKE '%agent_handoff%'
+              AND r.payload_json LIKE '%invalid%'
+          ) AS "rejectedHandoffAttempts"
         FROM orchestration_delegations
         WHERE state IN ('pending', 'running')
         ORDER BY created_at ASC

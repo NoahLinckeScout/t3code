@@ -28,6 +28,14 @@ export const DEFAULT_STALL_WINDOW_MS = 30 * 60 * 1000;
 
 export type StaleReason =
   /**
+   * The child called the handoff tool and had its arguments rejected, then
+   * stopped. Distinguished from plain abandonment because it is a different
+   * problem with a different fix: the child tried to report and the tool shape
+   * defeated it. Self-hosted implementers emit well-formed calls with empty
+   * arguments often enough that this must not read as "never tried".
+   */
+  | "handoff_attempted_but_rejected"
+  /**
    * The child's turn reached a terminal state and no handoff was ever accepted.
    * Deterministic: no clock, no threshold, no false positive from a slow model.
    * This is the run-one failure — a child that did the work, could not report,
@@ -50,6 +58,7 @@ export interface DelegationProgress {
   readonly lastActivityAt: string | null;
   readonly createdAt: string;
   readonly deadlineAt: string | null;
+  readonly rejectedHandoffAttempts: number;
 }
 
 export interface StaleVerdict {
@@ -86,11 +95,19 @@ export const classifyDelegation = (
 
   if (progress.childThreadId !== null && progress.latestTurnState !== null) {
     if (TERMINAL_TURN_STATES.has(progress.latestTurnState)) {
-      return {
-        reason: "child_turn_ended_without_handoff",
-        autoFail: true,
-        detail: `The child thread's turn is ${progress.latestTurnState} and no handoff was accepted. The work may well be done; the report was never made.`,
-      };
+      // More specific first: "tried and was rejected" and "never tried" look the
+      // same in the delegation record but need different responses.
+      return progress.rejectedHandoffAttempts > 0
+        ? {
+            reason: "handoff_attempted_but_rejected",
+            autoFail: true,
+            detail: `The child called the handoff tool ${progress.rejectedHandoffAttempts} time(s) and had its arguments rejected every time, then stopped. The work may well be done and the report was defeated by the tool call itself.`,
+          }
+        : {
+            reason: "child_turn_ended_without_handoff",
+            autoFail: true,
+            detail: `The child thread's turn is ${progress.latestTurnState} and no handoff was accepted. The work may well be done; the report was never made.`,
+          };
     }
   }
 

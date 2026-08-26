@@ -144,14 +144,23 @@ export const SpawnResult = Schema.Struct({
 });
 
 /**
- * Flat on purpose, and identical in fields to {@link DelegationHandoff}.
+ * Fields at the top level, identical to {@link DelegationHandoff}.
  *
- * This was `{ handoff: { ... } }` until a live GLM child failed 23 consecutive
- * calls against it. The model composed the right content every time and could
- * not close two levels of braces: every attempt came back
- * `JSON Parse error: Expected '}'`, and it started stripping quotes out of its
- * own evidence strings trying to appease the parser. One nesting level is a
- * real cost to a small model, paid on the one call that must not fail.
+ * This was `{ handoff: { ... } }` until a live GLM 5.2 child failed 23
+ * consecutive calls against it, every one `JSON Parse error: Expected '}'`. It
+ * composed the right content each time and could not close two levels of braces,
+ * and began stripping quotes out of its own evidence strings trying to appease
+ * the parser.
+ *
+ * GLM 5.3-Flash narrows the failure without removing it: measured over five runs
+ * each, the wrapped shape produced 3/5 valid calls and the unwrapped shape 5/5.
+ * The two failures were *silent* — well-formed calls with empty `{}` arguments
+ * rather than errors. That is why this stays a rule after the model upgrade, and
+ * why the staleness sweep reports an empty handoff attempt as its own outcome.
+ *
+ * The constraint is specifically the top-level wrapper. Nesting below it is
+ * fine: an array of objects measured 5/5, so these fields could carry richer
+ * entries than strings if a future need justifies it.
  */
 export const HandoffInput = DelegationHandoff;
 
@@ -208,6 +217,7 @@ export const InboxMessage = Schema.Struct({
 });
 
 export const StaleReason = Schema.Literals([
+  "handoff_attempted_but_rejected",
   "child_turn_ended_without_handoff",
   "never_started",
   "overdue",
