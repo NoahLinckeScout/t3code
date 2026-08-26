@@ -168,6 +168,89 @@ const cursorAdapterTestLayer = it.layer(
 );
 
 cursorAdapterTestLayer("CursorAdapterLive", (it) => {
+  it.effect("fails a turn whose stream ends with a provider transport error", () =>
+    Effect.gen(function* () {
+      // Reproduces the shape of five real deaths: `cursor-agent` streams an
+      // error line, then returns session/prompt successfully with
+      // `stopReason: "end_turn"`. Recording that as `completed` is what made
+      // four dead threads look idle for hours.
+      const adapter = yield* CursorAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-transport-failure-thread");
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({
+          T3_ACP_PROMPT_RESPONSE_TEXT:
+            "Error: RetriableError: [canceled] http/2 stream closed with error code CANCEL (0x8)",
+        }),
+      );
+      yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
+      });
+      yield* adapter.sendTurn({ threadId, input: "do the work", attachments: [] });
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const turnCompleted = runtimeEvents.find((event) => event.type === "turn.completed");
+      assert.isDefined(turnCompleted);
+      if (turnCompleted?.type === "turn.completed") {
+        // The provider still said end_turn; the harness must not believe it.
+        assert.equal(turnCompleted.payload.stopReason, "end_turn");
+        assert.equal(turnCompleted.payload.state, "failed");
+        assert.match(String(turnCompleted.payload.errorMessage), /RetriableError \[canceled\]/);
+      }
+    }),
+  );
+
+  it.effect("still completes a turn whose output merely mentions such an error", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-transport-discussion-thread");
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({
+          T3_ACP_PROMPT_RESPONSE_TEXT:
+            "I saw Error: RetriableError: [canceled] stream closed in the log, and traced it upstream.",
+        }),
+      );
+      yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
+      });
+      yield* adapter.sendTurn({ threadId, input: "diagnose the deaths", attachments: [] });
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const turnCompleted = runtimeEvents.find((event) => event.type === "turn.completed");
+      assert.isDefined(turnCompleted);
+      if (turnCompleted?.type === "turn.completed") {
+        assert.equal(turnCompleted.payload.state, "completed");
+      }
+    }),
+  );
+
   it.effect("starts a session and maps mock ACP prompt flow to runtime events", () =>
     Effect.gen(function* () {
       const adapter = yield* CursorAdapter;
