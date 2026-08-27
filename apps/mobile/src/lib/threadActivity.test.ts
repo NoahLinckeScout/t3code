@@ -853,6 +853,51 @@ describe("quiet timeline: nested agents", () => {
     expect(group.activities[0]?.icon).toBe("agent");
   });
 
+  it("keeps the failure chrome on a failed task that carries a taskId", () => {
+    // The `entry.taskId` collab-agent branch must not swallow error tone: a
+    // failed `task.completed` is still a failure, and `alert` is the only
+    // mobile signal that renders one. Web overlays failure after icon
+    // selection; mobile has one icon for both.
+    const turnId = TurnId.make("turn-collab-agent-failed");
+    const thread = makeThread({
+      id: ThreadId.make("thread-collab-agent-failed"),
+      projectId: ProjectId.make("project-1"),
+      title: "Failed collab agent work",
+      latestTurn: {
+        turnId,
+        state: "completed",
+        requestedAt: "2026-04-01T00:00:00.000Z",
+        startedAt: "2026-04-01T00:00:01.000Z",
+        completedAt: "2026-04-01T00:00:03.000Z",
+        assistantMessageId: null,
+      },
+      activities: [
+        makeActivity({
+          id: EventId.make("collab-agent-failed"),
+          kind: "tool.completed",
+          tone: "error",
+          summary: "Task: Subagent task",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          turnId,
+          payload: {
+            title: "Task: Subagent task",
+            itemType: "collab_agent_tool_call",
+            taskId: "subagent-1",
+            status: "failed",
+          },
+        }),
+      ],
+    });
+
+    const group = buildThreadFeed(thread)[0];
+    expect(group).toMatchObject({ type: "activity-group" });
+    if (!group || group.type !== "activity-group") {
+      return;
+    }
+
+    expect(group.activities[0]?.icon).toBe("alert");
+  });
+
   it("keeps a nested agent's terminal row but hides its background work", () => {
     const thread = makeThread({
       id: ThreadId.make("thread-nested"),
