@@ -13,6 +13,8 @@ import {
   MessageInput,
   MessageResult,
   OrchestrationToolkitError,
+  SettleSelfInput,
+  SettleSelfResult,
   SpawnInput,
   SpawnResult,
 } from "./schemas.ts";
@@ -78,9 +80,23 @@ export const AgentInboxTool = Tool.make("agent_inbox", {
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, false);
 
+export const AgentSettleSelfTool = Tool.make("agent_settle_self", {
+  description:
+    "Put THIS thread away when your work here is finished — it stops demanding attention in the thread list. Call it as your last action. Takes no arguments and always targets your own thread; you cannot settle another one. Settling normally takes effect once your turn ends, because a thread is still live while you are calling tools, so a false `settled` with a `deferredReason` is the ordinary success case and not a failure. Anything real happening on the thread afterwards un-settles it automatically.",
+  parameters: SettleSelfInput,
+  success: SettleSelfResult,
+  failure: OrchestrationToolkitError,
+  dependencies,
+})
+  .annotate(Tool.Title, "Settle this thread")
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
 export const OrchestrationToolkit = Toolkit.make(
   AgentSpawnTool,
   AgentHandoffTool,
   AgentMessageTool,
   AgentInboxTool,
+  AgentSettleSelfTool,
 );

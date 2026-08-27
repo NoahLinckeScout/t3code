@@ -132,6 +132,68 @@ instance enables `self-hosted-glm` and `self-hosted-kimi` only, so a 5.3 child
 needs a provider entry in OpenCode's own config first. The T3 Code side is
 config-only; the provider side is a separate file this toolkit does not own.
 
+## Settling a thread from inside it
+
+`agent_settle_self` takes no arguments and always targets the calling thread,
+resolved from the authenticated MCP session. There is no parameter that could
+redirect it, which is the same reason `agent_message` addresses by delegation
+rather than thread id. Zero required fields also means the tool is immune to the
+empty-`{}` failure above: a model cannot get a schema wrong that wants nothing.
+
+### It is deferred, and it has to be
+
+A thread **cannot** settle itself synchronously, and any design that assumes
+otherwise will fail 100% of the time. Two separate mechanisms are easy to
+conflate:
+
+- **Client-side rendering.** `effectiveSettled()` treats pending approvals, a
+  live session, and queued turn starts as hard blockers that beat the stored
+  override. This is a display rule, and it is where "the blockers win" is true.
+- **Server-side decision.** `decider.ts` _rejects_ `thread.settle` outright when
+  `session.status` is `starting` or `running`:
+  `thread <id> has an active session and cannot be settled`. The command fails.
+  Nothing is recorded.
+
+A thread is `running` for the entire time its own agent is calling tools. From a
+real spawn on this branch:
+
+```
+22:09:41.080  thread.session-set  status=running
+22:09:45.475  tool.started        t3-code_agent_spawn
+22:09:46.479  tool.completed      t3-code_agent_spawn
+22:09:48.208  thread.session-set  status=ready
+```
+
+The tool call sits strictly inside the running window. So a settle dispatched
+from a handler is always refused.
+
+`agent_settle_self` therefore attempts the dispatch, and on refusal records the
+request in `orchestration_settle_requests` and returns
+`{ settled: false, deferredReason: ... }`. That is the ordinary success path, not
+an error, and the tool description says so — otherwise a model would read the
+`false` as a failure and retry pointlessly.
+
+### What applies a deferred request
+
+The same opportunistic sweep that handles staleness, for the same reason: the
+natural trigger already exists. A parent calling `agent_inbox` to collect a
+child's handoff is precisely the moment that child has finished its turn, so
+children get tidied by the act of being read. A request whose thread is still
+live is skipped, and one the decider refuses for another reason (a pending
+approval, a queued turn start) simply stays pending and is retried next sweep.
+
+The same caveat as staleness applies and is worth stating plainly: if no thread
+ever calls a toolkit tool, nothing applies. A settle request is durable and
+correct whenever it is next examined, but it is not on a timer.
+
+### Why nothing here re-implements the settle rules
+
+The handler dispatches `thread.settle` and lets the decider judge it. The four
+invariants (archived, live session, pending approval or user input, queued turn
+start) stay in one place, and the server also auto-unsettles a thread when real
+activity arrives, so a settled thread that gets more work rejoins the active list
+without this toolkit tracking anything.
+
 ## Storage
 
 Two tables in the existing `state.sqlite`, created with `IF NOT EXISTS` when the

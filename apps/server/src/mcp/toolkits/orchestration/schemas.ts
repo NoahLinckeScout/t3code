@@ -204,6 +204,29 @@ export const MessageResult = Schema.Struct({
   wokeRecipient: Schema.Boolean,
 });
 
+/**
+ * No fields at all, and that is the design.
+ *
+ * The target is always the caller's own thread, taken from the authenticated MCP
+ * session. There is no parameter a caller could supply to redirect it, which is
+ * the same reason `agent_message` addresses by delegation rather than thread id.
+ *
+ * It also sidesteps the measured tool-call failure entirely: a schema with no
+ * required fields cannot be got wrong by a model that sometimes emits `{}`.
+ */
+export const SettleSelfInput = Schema.Struct({});
+
+export const SettleSelfResult = Schema.Struct({
+  /** True when the thread was settled now; false when the request was recorded for later. */
+  settled: Schema.Boolean,
+  /**
+   * Set when settling was deferred. A thread is always mid-turn while its own
+   * agent calls a tool, and the server refuses to settle a live session, so this
+   * is the ordinary outcome rather than an error.
+   */
+  deferredReason: Schema.NullOr(Schema.String),
+});
+
 export const InboxInput = Schema.Struct({
   includeDelivered: Schema.optional(Schema.Boolean),
 });

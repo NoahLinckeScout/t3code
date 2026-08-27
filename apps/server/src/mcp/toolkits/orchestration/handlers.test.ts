@@ -7,6 +7,7 @@ import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 
+import { OrchestrationCommandInvariantError } from "../../../orchestration/Errors.ts";
 import { OrchestrationEngineService } from "../../../orchestration/Services/OrchestrationEngine.ts";
 import { SqlitePersistenceMemory } from "../../../persistence/Layers/Sqlite.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -43,8 +44,25 @@ const invocationFor = (threadId: ThreadId) => ({
   issuedAt: 1,
 });
 
+// Mirrors the real decider: `thread.settle` is refused while the session is
+// live, which is always true while a thread's own agent is calling a tool.
+let settleDispatchesAccepted = false;
+const settleAttempts: Array<string> = [];
 const engineMock = Layer.mock(OrchestrationEngineService)({
-  dispatch: () => Effect.succeed({ sequence: 1 }),
+  dispatch: (command: { readonly type: string; readonly threadId?: string }) => {
+    if (command.type === "thread.settle") {
+      settleAttempts.push(String(command.threadId));
+      return settleDispatchesAccepted
+        ? Effect.succeed({ sequence: 1 })
+        : Effect.fail(
+            new OrchestrationCommandInvariantError({
+              commandType: "thread.settle",
+              detail: "thread has an active session and cannot be settled",
+            }),
+          );
+    }
+    return Effect.succeed({ sequence: 1 });
+  },
 });
 
 const rolesMock = Layer.mock(OrchestrationRoles)({
@@ -162,6 +180,67 @@ layer("orchestration handlers", (it) => {
       yield* callHandoff(child, handoff());
       const failure = yield* callHandoff(child, handoff({ status: "blocked" })).pipe(Effect.flip);
       assert.strictEqual(toolkitFailure(failure).reason, "delegation_not_live");
+    }),
+  );
+
+  it.effect("records a deferred settle request when the thread is still live", () =>
+    Effect.gen(function* () {
+      const store = yield* DelegationStore;
+      settleDispatchesAccepted = false;
+      settleAttempts.length = 0;
+
+      const built = yield* OrchestrationToolkit;
+      const result = yield* built
+        .handle("agent_settle_self", {})
+        .pipe(
+          Stream.unwrap,
+          Stream.run(Sink.last()),
+          Effect.flatMap(Effect.fromOption),
+          Effect.provideService(
+            McpInvocationContext.McpInvocationContext,
+            invocationFor(parentThreadId),
+          ),
+        );
+
+      const encoded = result.encodedResult as {
+        readonly settled: boolean;
+        readonly deferredReason: string | null;
+      };
+      // Deferral is the ordinary outcome, not an error: the tool must not report
+      // success it did not achieve, nor fail on the expected path.
+      assert.strictEqual(encoded.settled, false);
+      assert.match(String(encoded.deferredReason), /applied once the thread goes idle/);
+      assert.deepStrictEqual(settleAttempts, [parentThreadId]);
+
+      const pending = yield* store.pendingSettleRequests();
+      assert.include(
+        pending.map((request) => request.threadId),
+        parentThreadId,
+      );
+    }),
+  );
+
+  it.effect("settles immediately when the server accepts it", () =>
+    Effect.gen(function* () {
+      settleDispatchesAccepted = true;
+      settleAttempts.length = 0;
+
+      const built = yield* OrchestrationToolkit;
+      const result = yield* built
+        .handle("agent_settle_self", {})
+        .pipe(
+          Stream.unwrap,
+          Stream.run(Sink.last()),
+          Effect.flatMap(Effect.fromOption),
+          Effect.provideService(
+            McpInvocationContext.McpInvocationContext,
+            invocationFor(ThreadId.make("thread-settle-idle")),
+          ),
+        );
+
+      const encoded = result.encodedResult as { readonly settled: boolean };
+      assert.strictEqual(encoded.settled, true);
+      settleDispatchesAccepted = false;
     }),
   );
 

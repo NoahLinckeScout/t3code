@@ -78,6 +78,13 @@ export interface InboxRow {
   readonly createdAt: string;
 }
 
+export interface PendingSettleRow {
+  readonly threadId: ThreadId;
+  readonly requestedAt: string;
+  /** Live session status, or null when the thread has no session row. */
+  readonly sessionStatus: string | null;
+}
+
 export interface InsertPendingInput {
   readonly delegationId: DelegationId;
   readonly parentThreadId: ThreadId;
@@ -152,6 +159,15 @@ export interface DelegationStoreShape {
   ) => Effect.Effect<ReadonlyArray<InboxRow>, OrchestrationToolkitError>;
   readonly markDelivered: (
     messageIds: ReadonlyArray<string>,
+  ) => Effect.Effect<void, OrchestrationToolkitError>;
+  readonly requestSettle: (threadId: ThreadId) => Effect.Effect<void, OrchestrationToolkitError>;
+  /** Threads that asked to settle and have not been settled yet. */
+  readonly pendingSettleRequests: () => Effect.Effect<
+    ReadonlyArray<PendingSettleRow>,
+    OrchestrationToolkitError
+  >;
+  readonly markSettleApplied: (
+    threadId: ThreadId,
   ) => Effect.Effect<void, OrchestrationToolkitError>;
   /** Resolves the project a thread belongs to, needed to create a sibling. */
   readonly projectIdOfThread: (
@@ -234,6 +250,17 @@ const makeDelegationStore = Effect.gen(function* () {
     sql`
       CREATE INDEX IF NOT EXISTS orchestration_messages_recipient
         ON orchestration_messages (to_thread_id, delivered_at)
+    `,
+    // A thread cannot settle itself while it is mid-turn: `thread.settle` is
+    // rejected outright when the session is starting/running, and a thread is
+    // always running while its own agent calls a tool. So the request is
+    // recorded here and applied the next time the thread is observed idle.
+    sql`
+      CREATE TABLE IF NOT EXISTS orchestration_settle_requests (
+        thread_id TEXT PRIMARY KEY,
+        requested_at TEXT NOT NULL,
+        applied_at TEXT
+      )
     `,
   ]).pipe(Effect.mapError(storageFailed("DelegationStore.ensureSchema")));
 
@@ -554,6 +581,51 @@ const makeDelegationStore = Effect.gen(function* () {
     Effect.mapError(storageFailed("DelegationStore.markDelivered")),
   );
 
+  const requestSettle: DelegationStoreShape["requestSettle"] = Effect.fn(
+    "DelegationStore.requestSettle",
+  )(
+    function* (threadId) {
+      const now = yield* isoNow;
+      yield* sql`
+        INSERT INTO orchestration_settle_requests (thread_id, requested_at, applied_at)
+        VALUES (${threadId}, ${now}, NULL)
+        ON CONFLICT (thread_id) DO UPDATE SET requested_at = excluded.requested_at, applied_at = NULL
+      `;
+    },
+    Effect.mapError(storageFailed("DelegationStore.requestSettle")),
+  );
+
+  const pendingSettleRequests: DelegationStoreShape["pendingSettleRequests"] = Effect.fn(
+    "DelegationStore.pendingSettleRequests",
+  )(
+    function* () {
+      return yield* sql<PendingSettleRow>`
+        SELECT r.thread_id AS "threadId",
+               r.requested_at AS "requestedAt",
+               (
+                 SELECT s.status FROM projection_thread_sessions s
+                 WHERE s.thread_id = r.thread_id
+               ) AS "sessionStatus"
+        FROM orchestration_settle_requests r
+        WHERE r.applied_at IS NULL
+        ORDER BY r.requested_at ASC
+      `;
+    },
+    Effect.mapError(storageFailed("DelegationStore.pendingSettleRequests")),
+  );
+
+  const markSettleApplied: DelegationStoreShape["markSettleApplied"] = Effect.fn(
+    "DelegationStore.markSettleApplied",
+  )(
+    function* (threadId) {
+      const now = yield* isoNow;
+      yield* sql`
+        UPDATE orchestration_settle_requests SET applied_at = ${now} WHERE thread_id = ${threadId}
+      `;
+    },
+    Effect.mapError(storageFailed("DelegationStore.markSettleApplied")),
+  );
+
   const projectIdOfThread: DelegationStoreShape["projectIdOfThread"] = Effect.fn(
     "DelegationStore.projectIdOfThread",
   )(
@@ -596,6 +668,9 @@ const makeDelegationStore = Effect.gen(function* () {
     enqueueMessage,
     readInbox,
     markDelivered,
+    requestSettle,
+    pendingSettleRequests,
+    markSettleApplied,
     projectIdOfThread,
     worktreePathOfThread,
   });

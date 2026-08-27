@@ -29,11 +29,18 @@ import {
   AgentHandoffTool,
   AgentInboxTool,
   AgentMessageTool,
+  AgentSettleSelfTool,
   AgentSpawnTool,
   OrchestrationToolkit,
 } from "./tools.ts";
 
-const tools = [AgentSpawnTool, AgentHandoffTool, AgentMessageTool, AgentInboxTool];
+const tools = [
+  AgentSpawnTool,
+  AgentHandoffTool,
+  AgentMessageTool,
+  AgentInboxTool,
+  AgentSettleSelfTool,
+];
 
 interface JsonSchema {
   readonly type?: string | ReadonlyArray<string>;
@@ -112,6 +119,13 @@ describe("toolkit parameters carry their required fields at the top level", () =
       properties: { handoff: { type: "object", properties: { status: { type: "string" } } } },
     };
     assert.deepStrictEqual(topLevelObjectParameters(wrapped), ["handoff"]);
+  });
+
+  it("agent_settle_self takes no parameters at all, which cannot be got wrong", () => {
+    // The strongest form of the rule: a model that sometimes emits `{}` for a
+    // wrapped schema cannot mis-call a tool whose schema wants nothing.
+    const schema = Tool.getJsonSchema(AgentSettleSelfTool) as JsonSchema;
+    assert.deepStrictEqual(Object.keys(schema.properties ?? {}), []);
   });
 
   it("covers every tool the toolkit registers", () => {

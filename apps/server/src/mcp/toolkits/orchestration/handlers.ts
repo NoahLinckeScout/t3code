@@ -263,6 +263,7 @@ const agent_spawn = Effect.fn("OrchestrationToolkit.agent_spawn")(function* (inp
   // Before contending for a lease, retire anything that has plainly stopped.
   // A child that died holding a lease should not block its own replacement.
   yield* sweepStaleDelegations();
+  yield* applyPendingSettles();
 
   if (input.resourceLease !== undefined) {
     const holder = yield* store.findLiveByLease(input.resourceLease);
@@ -490,6 +491,71 @@ const agent_message = Effect.fn("OrchestrationToolkit.agent_message")(function* 
   };
 });
 
+/** Statuses the server refuses to settle. Mirrors the decider's own invariant. */
+const LIVE_SESSION_STATUSES: ReadonlySet<string> = new Set(["starting", "running"]);
+
+const dispatchSettle = Effect.fn("OrchestrationToolkit.dispatchSettle")(function* (
+  threadId: ThreadId,
+) {
+  const engine = yield* OrchestrationEngineService;
+  const crypto = yield* Crypto.Crypto;
+  const commandUuid = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+  yield* engine.dispatch({
+    type: "thread.settle",
+    commandId: CommandId.make(`settle:${threadId}:${commandUuid}`),
+    threadId,
+  });
+});
+
+/**
+ * Applies settle requests whose thread has since gone idle.
+ *
+ * Folded into the same opportunistic sweep as staleness, and for the same
+ * reason: the natural trigger already exists. A parent reading `agent_inbox` to
+ * collect a child's handoff is exactly the moment that child has finished its
+ * turn, so the child gets tidied by the act of being read.
+ */
+const applyPendingSettles = Effect.fn("OrchestrationToolkit.applyPendingSettles")(function* () {
+  const store = yield* DelegationStore;
+  const pending = yield* store.pendingSettleRequests();
+  for (const request of pending) {
+    if (request.sessionStatus !== null && LIVE_SESSION_STATUSES.has(request.sessionStatus)) {
+      continue;
+    }
+    // The decider may still refuse (a pending approval, a queued turn start).
+    // Leaving the request unapplied is correct: it retries on the next sweep.
+    const settled = yield* dispatchSettle(request.threadId).pipe(
+      Effect.as(true),
+      Effect.orElseSucceed(() => false),
+    );
+    if (settled) yield* store.markSettleApplied(request.threadId);
+  }
+});
+
+const agent_settle_self = Effect.fn("OrchestrationToolkit.agent_settle_self")(function* () {
+  const invocation = yield* McpInvocationContext.McpInvocationContext;
+  const store = yield* DelegationStore;
+
+  // Try now in case this thread is somehow already idle, then fall back to
+  // recording the intent. The server rejects a settle on a live session, and a
+  // thread is live while its own agent is calling this tool, so the deferred
+  // path is the normal one rather than the exception.
+  const settledNow = yield* dispatchSettle(invocation.threadId).pipe(
+    Effect.as(true),
+    Effect.orElseSucceed(() => false),
+  );
+  if (settledNow) {
+    return { settled: true, deferredReason: null };
+  }
+
+  yield* store.requestSettle(invocation.threadId);
+  return {
+    settled: false,
+    deferredReason:
+      "This thread is still live while you are calling tools, and the server will not settle a live session. The request is recorded and applied once the thread goes idle. Real activity afterwards un-settles it automatically.",
+  };
+});
+
 const agent_inbox = Effect.fn("OrchestrationToolkit.agent_inbox")(function* (input: {
   readonly includeDelivered?: boolean | undefined;
 }) {
@@ -503,6 +569,7 @@ const agent_inbox = Effect.fn("OrchestrationToolkit.agent_inbox")(function* (inp
   // Derive staleness before reading, so the answer is never "looks fine because
   // nobody has checked recently".
   const verdicts = yield* sweepStaleDelegations();
+  yield* applyPendingSettles();
   const rows = yield* store.listByParent(invocation.threadId);
   const delegations = yield* Effect.forEach(rows, (row) =>
     toInboxDelegation(row, verdicts.get(row.delegationId)),
@@ -527,6 +594,7 @@ const handlers = {
   agent_handoff,
   agent_message,
   agent_inbox,
+  agent_settle_self,
 } satisfies Parameters<typeof OrchestrationToolkit.toLayer>[0];
 
 export const OrchestrationToolkitHandlersLive = OrchestrationToolkit.toLayer(handlers);
