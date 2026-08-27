@@ -173,6 +173,37 @@ request in `orchestration_settle_requests` and returns
 an error, and the tool description says so — otherwise a model would read the
 `false` as a failure and retry pointlessly.
 
+### Success is read from the projection, never from the receipt
+
+Neither settle path reports on the dispatch result. Both re-read
+`projection_threads.settled_override` and report `settled: true` only when it
+says `settled`. A receipt means the command was accepted, which is a different
+claim, and a tool that reports success while the override stayed unset is the
+exact failure shape this toolkit exists to remove.
+
+Over HTTP the same rejection surfaces as an opaque **500** rather than a typed
+client error, because `orchestration/http.ts` funnels every dispatch failure
+through `failEnvironmentInternal("orchestration_dispatch_failed")`. The decider's
+own message — `thread <id> has an active session and cannot be settled` — is
+logged server-side with a correlating `traceId`, so it is recoverable, but a
+caller sees only "internal error". In-process callers like this toolkit get the
+typed error directly and do not depend on that mapping.
+
+### `settled` is not sticky, and that is deliberate
+
+A settle that applied can be undone seconds later. The server emits
+`thread.unsettled(reason: "activity")` the moment real work arrives on a settled
+thread. Observed in production: two threads settled at 04:48:00 and 04:48:01,
+both applied, both auto-unsettled at 04:51:47 and 04:51:59 when a message was
+sent to them.
+
+This is worth stating because the evidence for it looks alarming out of context.
+A `thread.settled` event with an accepted receipt sitting next to
+`settled_override = NULL` reads like a command that was accepted but never
+applied. It is not — it is a command that applied and was then correctly
+reverted. Distinguishing the two requires the event log; the projection alone
+cannot tell you which happened.
+
 ### What applies a deferred request
 
 The same opportunistic sweep that handles staleness, for the same reason: the

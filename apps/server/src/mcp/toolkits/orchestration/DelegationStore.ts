@@ -169,6 +169,17 @@ export interface DelegationStoreShape {
   readonly markSettleApplied: (
     threadId: ThreadId,
   ) => Effect.Effect<void, OrchestrationToolkitError>;
+  /**
+   * Reads back whether a thread is explicitly settled.
+   *
+   * The projection is the only place that answers "did the settle actually
+   * apply". A dispatch receipt says the command was accepted, which is a
+   * different question, and `settled` is not sticky besides: the server clears
+   * the override the moment real activity arrives.
+   */
+  readonly settledOverrideOfThread: (
+    threadId: ThreadId,
+  ) => Effect.Effect<string | undefined, OrchestrationToolkitError>;
   /** Resolves the project a thread belongs to, needed to create a sibling. */
   readonly projectIdOfThread: (
     threadId: ThreadId,
@@ -626,6 +637,19 @@ const makeDelegationStore = Effect.gen(function* () {
     Effect.mapError(storageFailed("DelegationStore.markSettleApplied")),
   );
 
+  const settledOverrideOfThread: DelegationStoreShape["settledOverrideOfThread"] = Effect.fn(
+    "DelegationStore.settledOverrideOfThread",
+  )(
+    function* (threadId) {
+      const rows = yield* sql<{ readonly settledOverride: string | null }>`
+        SELECT settled_override AS "settledOverride" FROM projection_threads
+        WHERE thread_id = ${threadId}
+      `;
+      return rows[0]?.settledOverride ?? undefined;
+    },
+    Effect.mapError(storageFailed("DelegationStore.settledOverrideOfThread")),
+  );
+
   const projectIdOfThread: DelegationStoreShape["projectIdOfThread"] = Effect.fn(
     "DelegationStore.projectIdOfThread",
   )(
@@ -671,6 +695,7 @@ const makeDelegationStore = Effect.gen(function* () {
     requestSettle,
     pendingSettleRequests,
     markSettleApplied,
+    settledOverrideOfThread,
     projectIdOfThread,
     worktreePathOfThread,
   });

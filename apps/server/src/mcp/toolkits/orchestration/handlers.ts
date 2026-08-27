@@ -524,11 +524,11 @@ const applyPendingSettles = Effect.fn("OrchestrationToolkit.applyPendingSettles"
     }
     // The decider may still refuse (a pending approval, a queued turn start).
     // Leaving the request unapplied is correct: it retries on the next sweep.
-    const settled = yield* dispatchSettle(request.threadId).pipe(
-      Effect.as(true),
-      Effect.orElseSucceed(() => false),
-    );
-    if (settled) yield* store.markSettleApplied(request.threadId);
+    // Confirmed by reading the projection rather than by the dispatch result,
+    // for the same reason as `agent_settle_self`.
+    yield* dispatchSettle(request.threadId).pipe(Effect.ignore);
+    const applied = yield* store.settledOverrideOfThread(request.threadId);
+    if (applied === "settled") yield* store.markSettleApplied(request.threadId);
   }
 });
 
@@ -540,11 +540,14 @@ const agent_settle_self = Effect.fn("OrchestrationToolkit.agent_settle_self")(fu
   // recording the intent. The server rejects a settle on a live session, and a
   // thread is live while its own agent is calling this tool, so the deferred
   // path is the normal one rather than the exception.
-  const settledNow = yield* dispatchSettle(invocation.threadId).pipe(
-    Effect.as(true),
-    Effect.orElseSucceed(() => false),
-  );
-  if (settledNow) {
+  //
+  // The dispatch result is not the answer. An accepted receipt means the command
+  // was taken, not that the thread is settled, so the projection is read back
+  // before reporting success. Claiming `settled` while the override stayed unset
+  // is exactly the shape of failure this toolkit exists to remove.
+  yield* dispatchSettle(invocation.threadId).pipe(Effect.ignore);
+  const applied = yield* store.settledOverrideOfThread(invocation.threadId);
+  if (applied === "settled") {
     return { settled: true, deferredReason: null };
   }
 

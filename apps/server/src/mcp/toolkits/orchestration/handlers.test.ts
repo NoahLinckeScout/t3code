@@ -6,6 +6,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { OrchestrationCommandInvariantError } from "../../../orchestration/Errors.ts";
 import { OrchestrationEngineService } from "../../../orchestration/Services/OrchestrationEngine.ts";
@@ -220,10 +221,23 @@ layer("orchestration handlers", (it) => {
     }),
   );
 
-  it.effect("settles immediately when the server accepts it", () =>
+  it.effect("reports settled only when the projection actually says so", () =>
     Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const idle = ThreadId.make("thread-settle-idle");
+      // A dispatch the engine accepts is not evidence the thread is settled, so
+      // the projection is what the tool reports on.
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, created_at, updated_at,
+          runtime_mode, interaction_mode, pending_approval_count,
+          pending_user_input_count, has_actionable_proposed_plan, settled_override
+        ) VALUES (
+          ${idle}, 'project-1', 'Idle', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z',
+          'full-access', 'default', 0, 0, 0, 'settled'
+        )
+      `;
       settleDispatchesAccepted = true;
-      settleAttempts.length = 0;
 
       const built = yield* OrchestrationToolkit;
       const result = yield* built
@@ -232,14 +246,45 @@ layer("orchestration handlers", (it) => {
           Stream.unwrap,
           Stream.run(Sink.last()),
           Effect.flatMap(Effect.fromOption),
-          Effect.provideService(
-            McpInvocationContext.McpInvocationContext,
-            invocationFor(ThreadId.make("thread-settle-idle")),
-          ),
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocationFor(idle)),
         );
 
-      const encoded = result.encodedResult as { readonly settled: boolean };
-      assert.strictEqual(encoded.settled, true);
+      assert.strictEqual((result.encodedResult as { readonly settled: boolean }).settled, true);
+      settleDispatchesAccepted = false;
+    }),
+  );
+
+  it.effect("does not claim settled when the override stayed unset", () =>
+    Effect.gen(function* () {
+      const store = yield* DelegationStore;
+      const accepted = ThreadId.make("thread-settle-accepted-but-unapplied");
+      // The dangerous case: the engine accepts the command and the projection
+      // never shows the override. Reporting success here is the exact failure
+      // this toolkit exists to remove.
+      settleDispatchesAccepted = true;
+
+      const built = yield* OrchestrationToolkit;
+      const result = yield* built
+        .handle("agent_settle_self", {})
+        .pipe(
+          Stream.unwrap,
+          Stream.run(Sink.last()),
+          Effect.flatMap(Effect.fromOption),
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocationFor(accepted)),
+        );
+
+      const encoded = result.encodedResult as {
+        readonly settled: boolean;
+        readonly deferredReason: string | null;
+      };
+      assert.strictEqual(encoded.settled, false);
+      assert.isNotNull(encoded.deferredReason);
+      // And it is queued, so a later sweep retries rather than losing the intent.
+      const pending = yield* store.pendingSettleRequests();
+      assert.include(
+        pending.map((request) => request.threadId),
+        accepted,
+      );
       settleDispatchesAccepted = false;
     }),
   );
