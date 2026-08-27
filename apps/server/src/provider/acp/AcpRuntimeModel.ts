@@ -754,13 +754,72 @@ function boundToolCallRawPayload(
   };
 }
 
+/** Longest excerpt kept when reporting an update this build cannot represent. */
+const DISCARDED_UPDATE_EXCERPT_LIMIT = 512;
+
+/**
+ * A session update that produced no runtime event.
+ *
+ * Reported rather than dropped. A provider that says something this build does
+ * not understand is the interesting case, not the boring one: the short
+ * `RetriableError` line that reached a transcript arrived as a plain text chunk,
+ * and anything richer the agent may have sent alongside it would have been
+ * discarded here without a trace. Native payload logging summarises values away
+ * (`valueType`/`fieldCount`), so a silent `break` here means the content is
+ * unrecoverable after the fact.
+ */
+export interface DiscardedSessionUpdate {
+  readonly sessionUpdate: string;
+  readonly contentType?: string;
+  readonly excerpt: string;
+}
+
+const excerptOf = (value: unknown): string => {
+  const encoded = typeof value === "string" ? value : (JSON.stringify(value) ?? String(value));
+  return encoded.length <= DISCARDED_UPDATE_EXCERPT_LIMIT
+    ? encoded
+    : `${encoded.slice(0, DISCARDED_UPDATE_EXCERPT_LIMIT)}…`;
+};
+
+/**
+ * Best-effort text for any ACP content block.
+ *
+ * Only `text` used to be understood, so a provider sending a `resource_link` or
+ * an embedded text `resource` contributed nothing to the transcript. Those two
+ * carry human-readable fields (`title`, `description`, `text`) and are rendered
+ * here. Binary blocks deliberately return undefined rather than being inlined —
+ * they are reported as discarded instead.
+ */
+export function contentBlockText(content: EffectAcpSchema.ContentBlock): string | undefined {
+  switch (content.type) {
+    case "text":
+      return content.text.length > 0 ? content.text : undefined;
+    case "resource_link": {
+      const parts = [content.title ?? content.name, content.description ?? undefined, content.uri]
+        .map((part) => part?.trim())
+        .filter((part): part is string => part !== undefined && part.length > 0);
+      return parts.length > 0 ? parts.join(" — ") : undefined;
+    }
+    case "resource": {
+      const resource = content.resource as { readonly text?: string };
+      return typeof resource.text === "string" && resource.text.length > 0
+        ? resource.text
+        : undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+
 export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotification): {
   readonly modeId?: string;
   readonly events: ReadonlyArray<AcpParsedSessionEvent>;
+  readonly discarded?: DiscardedSessionUpdate;
 } {
   const upd = params.update;
   const events: Array<AcpParsedSessionEvent> = [];
   let modeId: string | undefined;
+  let discarded: DiscardedSessionUpdate | undefined;
 
   switch (upd.sessionUpdate) {
     case "current_mode_update": {
@@ -814,18 +873,36 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
       break;
     }
     case "agent_message_chunk": {
-      if (upd.content.type === "text" && upd.content.text.length > 0) {
+      const text = contentBlockText(upd.content);
+      if (text !== undefined) {
         events.push({
           _tag: "ContentDelta",
-          text: upd.content.text,
+          text,
           rawPayload: params,
         });
+      } else {
+        discarded = {
+          sessionUpdate: upd.sessionUpdate,
+          contentType: upd.content.type,
+          excerpt: excerptOf(upd.content),
+        };
       }
       break;
     }
     default:
+      // An update variant this build does not model. Reported, never silently
+      // dropped: a vendor extension carrying the detail behind a bare error code
+      // would otherwise vanish here with nothing recoverable afterwards.
+      discarded = {
+        sessionUpdate: String((upd as { readonly sessionUpdate?: unknown }).sessionUpdate),
+        excerpt: excerptOf(upd),
+      };
       break;
   }
 
-  return { ...(modeId !== undefined ? { modeId } : {}), events };
+  return {
+    ...(modeId !== undefined ? { modeId } : {}),
+    events,
+    ...(discarded !== undefined ? { discarded } : {}),
+  };
 }

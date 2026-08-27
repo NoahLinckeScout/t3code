@@ -16,6 +16,80 @@ import {
 } from "./AcpRuntimeModel.ts";
 
 describe("AcpRuntimeModel", () => {
+  const chunk = (content: unknown) =>
+    parseSessionUpdateEvent({
+      sessionId: "session-drop",
+      update: { sessionUpdate: "agent_message_chunk", content },
+    } as unknown as EffectAcpSchema.SessionNotification);
+
+  it("still streams a plain text chunk", () => {
+    const parsed = chunk({ type: "text", text: "hello" });
+    expect(parsed.events).toHaveLength(1);
+    expect(parsed.discarded).toBeUndefined();
+  });
+
+  it("renders a resource_link instead of dropping it", () => {
+    // These carry `title` and `description`, which is exactly where a provider
+    // would put the human-readable half of an error it only coded numerically.
+    const parsed = chunk({
+      type: "resource_link",
+      name: "error",
+      title: "Unable to reach the model provider",
+      description: "This might be temporary",
+      uri: "cursor://error/resource_exhausted",
+    });
+    expect(parsed.discarded).toBeUndefined();
+    const [event] = parsed.events;
+    expect(event?._tag).toBe("ContentDelta");
+    if (event?._tag === "ContentDelta") {
+      expect(event.text).toContain("Unable to reach the model provider");
+      expect(event.text).toContain("This might be temporary");
+    }
+  });
+
+  it("renders an embedded text resource instead of dropping it", () => {
+    const parsed = chunk({
+      type: "resource",
+      resource: { uri: "cursor://detail", mimeType: "text/plain", text: "provider unreachable" },
+    });
+    const [event] = parsed.events;
+    expect(event?._tag).toBe("ContentDelta");
+    if (event?._tag === "ContentDelta") {
+      expect(event.text).toBe("provider unreachable");
+    }
+  });
+
+  it("reports a binary chunk rather than inlining or silently dropping it", () => {
+    const parsed = chunk({ type: "image", data: "AAAA", mimeType: "image/png" });
+    expect(parsed.events).toHaveLength(0);
+    expect(parsed.discarded?.contentType).toBe("image");
+    expect(parsed.discarded?.sessionUpdate).toBe("agent_message_chunk");
+  });
+
+  it("reports an update variant this build does not model", () => {
+    // The case that mattered: a vendor extension carrying detail behind a bare
+    // error code used to vanish here, and native payload logging summarises
+    // values away, so nothing was recoverable afterwards.
+    const parsed = parseSessionUpdateEvent({
+      sessionId: "session-drop",
+      update: {
+        sessionUpdate: "cursor_error_details",
+        title: "Unable to reach the model provider",
+      },
+    } as unknown as EffectAcpSchema.SessionNotification);
+    expect(parsed.events).toHaveLength(0);
+    expect(parsed.discarded?.sessionUpdate).toBe("cursor_error_details");
+    expect(parsed.discarded?.excerpt).toContain("Unable to reach the model provider");
+  });
+
+  it("bounds the excerpt it keeps", () => {
+    const parsed = parseSessionUpdateEvent({
+      sessionId: "session-drop",
+      update: { sessionUpdate: "unknown_variant", blob: "x".repeat(5000) },
+    } as unknown as EffectAcpSchema.SessionNotification);
+    expect(parsed.discarded?.excerpt.length).toBeLessThanOrEqual(513);
+  });
+
   it("parses session mode state from typed ACP session setup responses", () => {
     const modeState = parseSessionModeState({
       sessionId: "session-1",
