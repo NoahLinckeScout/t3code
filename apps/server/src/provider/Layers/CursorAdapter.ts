@@ -44,6 +44,11 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import {
+  appendTrailingText,
+  providerTransportFailure,
+  transportFailureMessage,
+} from "../transportFailure.ts";
+import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
   ProviderAdapterSessionNotFoundError,
@@ -133,6 +138,10 @@ interface CursorSessionContext {
   readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
   lastPlanFingerprint: string | undefined;
   activeTurnId: TurnId | undefined;
+  /** Bounded trailing window of the current turn's assistant text. A provider
+   * CLI can end a killed turn with `stopReason: "end_turn"`, so the last line it
+   * emitted is the only evidence that the turn failed. */
+  trailingText: string;
   /** Number of sendTurn prompts currently in flight or being prepared.
    * >0 means a turn is actively running, so a new sendTurn is a steer that
    * continues it, and only the last remaining prompt settles the turn. */
@@ -778,6 +787,7 @@ export function makeCursorAdapter(
             turns: [],
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
+            trailingText: "",
             promptsInFlight: 0,
             stopped: false,
           };
@@ -849,6 +859,7 @@ export function makeCursorAdapter(
                     );
                     return;
                   case "ContentDelta":
+                    ctx.trailingText = appendTrailingText(ctx.trailingText, event.text);
                     yield* logNative(
                       ctx.threadId,
                       "session/update",
@@ -1037,6 +1048,16 @@ export function makeCursorAdapter(
           // superseded prompt resolving (usually cancelled) while another is
           // in flight or pending must leave the merged turn running.
           if (ctx.promptsInFlight === 1) {
+            // A transport-killed turn comes back from `session/prompt` as a
+            // success with `stopReason: "end_turn"`, so the stop reason cannot
+            // distinguish it. The provider's own error line, emitted as the last
+            // thing on the stream, is the only signal that the turn produced
+            // nothing. Recording that as `completed` is how five dead threads
+            // looked idle instead of crashed.
+            const failure =
+              result.stopReason === "cancelled"
+                ? undefined
+                : providerTransportFailure(ctx.trailingText);
             yield* offerRuntimeEvent({
               type: "turn.completed",
               ...(yield* makeEventStamp()),
@@ -1044,11 +1065,18 @@ export function makeCursorAdapter(
               threadId: input.threadId,
               turnId,
               payload: {
-                state: result.stopReason === "cancelled" ? "cancelled" : "completed",
+                state:
+                  result.stopReason === "cancelled"
+                    ? "cancelled"
+                    : failure
+                      ? "failed"
+                      : "completed",
                 stopReason: result.stopReason ?? null,
+                ...(failure ? { errorMessage: transportFailureMessage(failure) } : {}),
               },
             });
           }
+          ctx.trailingText = "";
 
           return {
             threadId: input.threadId,
