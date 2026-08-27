@@ -809,6 +809,50 @@ describe("buildThreadFeed", () => {
 });
 
 describe("quiet timeline: nested agents", () => {
+  it("renders a collab agent tool call as agent work, not generic tool noise", () => {
+    // The server's ACP Task-tool reclassification means Cursor/Grok subagent
+    // launches arrive with this itemType. Grouping them with
+    // `dynamic_tool_call`'s hammer is how invisible delegated work stays
+    // invisible on mobile: every other surface reads this type as an agent.
+    const turnId = TurnId.make("turn-collab-agent");
+    const thread = makeThread({
+      id: ThreadId.make("thread-collab-agent"),
+      projectId: ProjectId.make("project-1"),
+      title: "Collab agent work",
+      latestTurn: {
+        turnId,
+        state: "completed",
+        requestedAt: "2026-04-01T00:00:00.000Z",
+        startedAt: "2026-04-01T00:00:01.000Z",
+        completedAt: "2026-04-01T00:00:03.000Z",
+        assistantMessageId: null,
+      },
+      activities: [
+        makeActivity({
+          id: EventId.make("collab-agent-completed"),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "Task: Subagent task",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          turnId,
+          payload: {
+            title: "Task: Subagent task",
+            itemType: "collab_agent_tool_call",
+            status: "completed",
+          },
+        }),
+      ],
+    });
+
+    const group = buildThreadFeed(thread)[0];
+    expect(group).toMatchObject({ type: "activity-group" });
+    if (!group || group.type !== "activity-group") {
+      return;
+    }
+
+    expect(group.activities[0]?.icon).toBe("agent");
+  });
+
   it("keeps a nested agent's terminal row but hides its background work", () => {
     const thread = makeThread({
       id: ThreadId.make("thread-nested"),

@@ -650,9 +650,11 @@ function workEntryIcon(entry: DerivedWorkLogEntry): ThreadFeedActivity["icon"] {
   if (entry.itemType === "web_search") return "globe";
   if (entry.itemType === "image_view") return "eye";
   if (entry.itemType === "mcp_tool_call") return "wrench";
-  if (entry.itemType === "dynamic_tool_call" || entry.itemType === "collab_agent_tool_call") {
-    return "hammer";
-  }
+  // The ACP Task-tool reclassification now files delegated subagent launches
+  // here; they are agent work, not another anonymous tool row. Matches the
+  // web timeline, which reads the same type as `agent-tool`.
+  if (entry.itemType === "collab_agent_tool_call" || entry.taskId) return "agent";
+  if (entry.itemType === "dynamic_tool_call") return "hammer";
   if (entry.tone === "error") return "alert";
   if (entry.tone === "thinking") return "agent";
   if (entry.tone === "info") return "check";
