@@ -939,6 +939,126 @@ const ThreadSessionStopCommand = Schema.Struct({
   onlyIfSettled: Schema.optional(Schema.Boolean),
 });
 
+/**
+ * The terminal report a delegated child owes its parent.
+ *
+ * This is the wire twin of the orchestration toolkit's `DelegationHandoff`.
+ * It lives here because `agent.handoff` crosses `POST /api/orchestration/dispatch`;
+ * the toolkit schema re-exports it so both paths validate one struct.
+ */
+export const AgentDelegationHandoff = Schema.Struct({
+  status: Schema.Literals(["completed", "blocked"]),
+  summary: TrimmedNonEmptyString,
+  artifacts: Schema.Array(TrimmedNonEmptyString),
+  validation: Schema.Array(TrimmedNonEmptyString),
+  remainingRisks: Schema.Array(TrimmedNonEmptyString),
+  nextStep: TrimmedNonEmptyString,
+});
+export type AgentDelegationHandoff = typeof AgentDelegationHandoff.Type;
+
+/**
+ * `agent.*` — the orchestration toolkit, dispatchable without MCP.
+ *
+ * These commands exist so providers whose adapter injects no MCP config
+ * (Cursor) and callers that outlive an in-memory MCP credential can drive
+ * spawning, handoff, and inbox exactly as an MCP-capable coordinator does.
+ * They are handled by the agent command runner over the same handler functions
+ * the MCP tools use; the decider never sees them.
+ *
+ * Every command carries `actorThreadId`: the thread the caller claims to be
+ * (the parent for `agent.spawn`, the child for `agent.handoff`). Authority on
+ * this path is the same as `thread.turn.start` — a caller that can dispatch can
+ * address threads — and the delegation record is what makes the act auditable.
+ * `agent.whoami` deliberately carries none: its answer comes from the
+ * authenticated session's thread binding, never from the wire, and fails closed
+ * when the session is not bound.
+ *
+ * There is no `modelSelection` on `agent.spawn` on purpose. Callers name a
+ * role; the roles config decides which provider instance and model serve it.
+ * That keeps Opus-routing a config decision rather than a JSON blob any CLI
+ * can send.
+ */
+const AgentCommandIdField = { commandId: CommandId } as const;
+const AgentActorField = { actorThreadId: ThreadId } as const;
+
+const AgentSpawnCommand = Schema.Struct({
+  type: Schema.Literal("agent.spawn"),
+  ...AgentCommandIdField,
+  ...AgentActorField,
+  role: TrimmedNonEmptyString,
+  objective: TrimmedNonEmptyString,
+  judgment: TrimmedNonEmptyString,
+  nonGoals: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  resourceLease: Schema.optional(TrimmedNonEmptyString),
+  workdir: Schema.optional(TrimmedNonEmptyString),
+  idempotencyKey: Schema.optional(TrimmedNonEmptyString),
+});
+
+const AgentHandoffCommand = Schema.Struct({
+  type: Schema.Literal("agent.handoff"),
+  ...AgentCommandIdField,
+  ...AgentActorField,
+  handoff: AgentDelegationHandoff,
+});
+
+const AgentMessageCommand = Schema.Struct({
+  type: Schema.Literal("agent.message"),
+  ...AgentCommandIdField,
+  ...AgentActorField,
+  toDelegationId: TrimmedNonEmptyString,
+  body: TrimmedNonEmptyString,
+  idempotencyKey: TrimmedNonEmptyString,
+});
+
+const AgentInboxCommand = Schema.Struct({
+  type: Schema.Literal("agent.inbox"),
+  ...AgentCommandIdField,
+  ...AgentActorField,
+  includeDelivered: Schema.optional(Schema.Boolean),
+});
+
+const AgentSettleSelfCommand = Schema.Struct({
+  type: Schema.Literal("agent.settle-self"),
+  ...AgentCommandIdField,
+  ...AgentActorField,
+});
+
+const AgentWhoamiCommand = Schema.Struct({
+  type: Schema.Literal("agent.whoami"),
+  ...AgentCommandIdField,
+});
+
+export type AgentSpawnCommand = typeof AgentSpawnCommand.Type;
+export type AgentHandoffCommand = typeof AgentHandoffCommand.Type;
+export type AgentMessageCommand = typeof AgentMessageCommand.Type;
+export type AgentInboxCommand = typeof AgentInboxCommand.Type;
+export type AgentSettleSelfCommand = typeof AgentSettleSelfCommand.Type;
+export type AgentWhoamiCommand = typeof AgentWhoamiCommand.Type;
+
+export const AgentOrchestrationCommand = Schema.Union([
+  AgentSpawnCommand,
+  AgentHandoffCommand,
+  AgentMessageCommand,
+  AgentInboxCommand,
+  AgentSettleSelfCommand,
+  AgentWhoamiCommand,
+]);
+export type AgentOrchestrationCommand = typeof AgentOrchestrationCommand.Type;
+
+const AGENT_COMMAND_TYPES = [
+  "agent.spawn",
+  "agent.handoff",
+  "agent.message",
+  "agent.inbox",
+  "agent.settle-self",
+  "agent.whoami",
+] as const satisfies ReadonlyArray<AgentOrchestrationCommand["type"]>;
+
+export type AgentCommandType = (typeof AGENT_COMMAND_TYPES)[number];
+
+export const isAgentCommandType = (type: string): type is AgentCommandType =>
+  (AGENT_COMMAND_TYPES as ReadonlyArray<string>).includes(type);
+
 const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
@@ -963,6 +1083,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
+  AgentOrchestrationCommand,
 ]);
 export type DispatchableClientOrchestrationCommand =
   typeof DispatchableClientOrchestrationCommand.Type;
@@ -991,6 +1112,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
+  AgentOrchestrationCommand,
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 
@@ -1609,6 +1731,9 @@ export type ProjectionPendingApprovalDecision = typeof ProjectionPendingApproval
 
 export const DispatchResult = Schema.Struct({
   sequence: NonNegativeInt,
+  // Set only by agent.whoami: the thread id the authenticated caller is bound
+  // to. Optional so every other command's result keeps its old shape.
+  self: Schema.optional(ThreadId),
 });
 export type DispatchResult = typeof DispatchResult.Type;
 

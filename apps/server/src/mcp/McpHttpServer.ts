@@ -13,6 +13,11 @@ import packageJson from "../../package.json" with { type: "json" };
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import { OrchestrationActor } from "./toolkits/orchestration/actor.ts";
+import * as DelegationStore from "./toolkits/orchestration/DelegationStore.ts";
+import { OrchestrationToolkitHandlersLive } from "./toolkits/orchestration/handlers.ts";
+import * as OrchestrationRoles from "./toolkits/orchestration/roles.ts";
+import { OrchestrationToolkit } from "./toolkits/orchestration/tools.ts";
 import {
   PreviewSnapshotToolkitHandlersLive,
   PreviewStandardToolkitHandlersLive,
@@ -85,6 +90,7 @@ const makeMcpAuthMiddleware = McpSessionRegistry.McpSessionRegistry.pipe(
         }
         return yield* httpEffect.pipe(
           Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(OrchestrationActor, { threadId: invocation.threadId }),
           Effect.map(normalizeMcpHttpResponse),
         );
       }),
@@ -216,6 +222,15 @@ export const PreviewToolkitRegistrationLive = Layer.mergeAll(
   PreviewSnapshotRegistrationLive,
 );
 
+export const OrchestrationToolkitRegistrationLive = McpServer.toolkit(OrchestrationToolkit).pipe(
+  Layer.provide(
+    OrchestrationToolkitHandlersLive.pipe(
+      Layer.provide(DelegationStore.layer),
+      Layer.provide(OrchestrationRoles.layer),
+    ),
+  ),
+);
+
 const McpTransportLive = McpServer.layerHttp({
   name: "T3 Code",
   version: packageJson.version,
@@ -223,4 +238,7 @@ const McpTransportLive = McpServer.layerHttp({
   protocols: [McpProtocol.v2025_06_18],
 }).pipe(Layer.provide(McpAuthMiddlewareLive));
 
-export const layer = PreviewToolkitRegistrationLive.pipe(Layer.provideMerge(McpTransportLive));
+export const layer = Layer.mergeAll(
+  PreviewToolkitRegistrationLive,
+  OrchestrationToolkitRegistrationLive,
+).pipe(Layer.provideMerge(McpTransportLive));

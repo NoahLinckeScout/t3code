@@ -27,6 +27,7 @@ import {
   extractModelConfigId,
   findSessionConfigOption,
   mergeToolCallState,
+  toolCallProgressLength,
   parseSessionModeState,
   parseSessionUpdateEvent,
   sessionUpdateIsReplay,
@@ -233,6 +234,7 @@ export class AcpSessionRuntime extends Context.Service<
      */
     readonly setSessionModel: (
       modelId: string,
+      meta?: EffectAcpSchema.SetSessionModelRequest["_meta"],
     ) => Effect.Effect<EffectAcpSchema.SetSessionModelResponse, EffectAcpErrors.AcpError>;
     /**
      * Sends a generic ACP extension request and records it through the request logger.
@@ -796,12 +798,13 @@ export const make = (
           Effect.flatMap((started) => setConfigOption(started.modelConfigId ?? "model", model)),
           Effect.asVoid,
         ),
-      setSessionModel: (modelId) =>
+      setSessionModel: (modelId, meta) =>
         getStartedState.pipe(
           Effect.flatMap((started) => {
             const requestPayload = {
               sessionId: started.sessionId,
               modelId,
+              ...(meta !== undefined ? { _meta: meta } : {}),
             } satisfies EffectAcpSchema.SetSessionModelRequest;
             return runLoggedRequest(
               "session/set_model",
@@ -865,6 +868,18 @@ const handleSessionUpdate = ({
 }): Effect.Effect<void> =>
   Effect.gen(function* () {
     const parsed = parseSessionUpdateEvent(params);
+    if (parsed.discarded) {
+      // The one place a provider's unmodelled output is still recoverable.
+      // Native payload logging summarises values away, so without this a vendor
+      // extension carrying the detail behind a bare error code leaves no trace.
+      yield* Effect.logWarning("ACP session update produced no runtime event", {
+        sessionUpdate: parsed.discarded.sessionUpdate,
+        ...(parsed.discarded.contentType === undefined
+          ? {}
+          : { contentType: parsed.discarded.contentType }),
+        excerpt: parsed.discarded.excerpt,
+      });
+    }
     if (parsed.modeId) {
       yield* Ref.update(modeStateRef, (current) =>
         current === undefined ? current : updateModeState(current, parsed.modeId!),
@@ -893,7 +908,7 @@ const handleSessionUpdate = ({
             next.set(nextToolCall.toolCallId, {
               state: nextToolCall,
               lastEmittedDetailLength: decision.emit
-                ? nextToolCall.detail?.length
+                ? toolCallProgressLength(nextToolCall)
                 : tracked?.lastEmittedDetailLength,
               skippedSinceEmit: decision.skippedSinceEmit,
             });

@@ -1405,6 +1405,22 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       return [unsettledEvent, activityAppendedEvent];
     }
 
+    case "agent.spawn":
+    case "agent.handoff":
+    case "agent.message":
+    case "agent.inbox":
+    case "agent.settle-self":
+    case "agent.whoami": {
+      // Agent commands are answered by the AgentCommandRunner at the dispatch
+      // boundary and must never be decided here: they are multi-command
+      // orchestrations over delegation state, not events. Reaching this branch
+      // means a dispatch path skipped the runner.
+      return yield* new OrchestrationCommandInvariantError({
+        commandType: command.type,
+        detail: `Agent commands are handled by the agent command runner, not the decider: ${command.type}.`,
+      });
+    }
+
     default: {
       command satisfies never;
       const fallback = command as never as { type: string };

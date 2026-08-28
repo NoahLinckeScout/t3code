@@ -55,6 +55,7 @@ import * as ThreadBackgroundLiveness from "../src/orchestration/ThreadBackground
 import * as ThreadPlanProgress from "../src/orchestration/ThreadPlanProgress.ts";
 import { RuntimeReceiptBusTest } from "../src/orchestration/Layers/RuntimeReceiptBus.ts";
 import { OrchestrationReactorLive } from "../src/orchestration/Layers/OrchestrationReactor.ts";
+import * as DelegationStoreLayer from "../src/mcp/toolkits/orchestration/DelegationStore.ts";
 import { ProviderCommandReactorLive } from "../src/orchestration/Layers/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionLive } from "../src/orchestration/Layers/ProviderRuntimeIngestion.ts";
 import { CheckpointReactor } from "../src/orchestration/Services/CheckpointReactor.ts";
@@ -387,6 +388,9 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(runtimeServicesLayer),
       Layer.provideMerge(orchestrationReactorLayer),
       Layer.provideMerge(providerRegistryLayer),
+      // The delegation wake reactor inside OrchestrationReactorLive reads live
+      // delegations; the store shares the sqlite client built below.
+      Layer.provide(DelegationStoreLayer.layer),
       Layer.provide(persistenceLayer),
       Layer.provideMerge(RepositoryIdentityResolver.layer),
       Layer.provideMerge(ServerSettingsService.layerTest()),

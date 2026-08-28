@@ -55,6 +55,7 @@ import * as ProcessRunner from "./processRunner.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
+import * as ServerSingleton from "./serverSingleton.ts";
 import { OrchestrationReactorLive } from "./orchestration/Layers/OrchestrationReactor.ts";
 import { RuntimeReceiptBusLive } from "./orchestration/Layers/RuntimeReceiptBus.ts";
 import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRuntimeIngestion.ts";
@@ -111,6 +112,10 @@ import * as ResourceMonitorBinary from "./resourceTelemetry/ResourceMonitorBinar
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
+import * as OrchestrationClientCommandDispatch from "./orchestration/Services/ClientOrchestrationCommandDispatch.ts";
+import * as DelegationStoreLayer from "./mcp/toolkits/orchestration/DelegationStore.ts";
+import * as OrchestrationRolesLayer from "./mcp/toolkits/orchestration/roles.ts";
+import { OrchestrationCommandReceiptRepositoryLive } from "./persistence/Layers/OrchestrationCommandReceipts.ts";
 import {
   clearPersistedServerRuntimeState,
   makePersistedServerRuntimeState,
@@ -182,6 +187,20 @@ const RelayClientLive = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
     return RelayClient.layerCloudflared({ baseDir: config.baseDir });
+  }),
+);
+
+/**
+ * Claims the data directory before anything binds a port or opens the database.
+ *
+ * Provided into `HttpServerLive` rather than merged alongside it so the ordering
+ * is structural: the lock is a dependency of the thing it protects, and a second
+ * server cannot reach a listening socket while another holds the directory.
+ */
+const ServerSingletonLive = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    yield* ServerSingleton.acquireServerSingleton(config.stateDir);
   }),
 );
 
@@ -383,7 +402,10 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(ProviderRuntimeLayerLive),
   Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive)),
   Layer.provideMerge(PersistenceLayerLive),
-  Layer.provideMerge(Keybindings.layer),
+  // The delegation wake reactor (part of the orchestration reactors above)
+  // reads live delegations through the same sqlite-backed store the MCP
+  // toolkit uses; merged with persistence so both build on one SqlClient.
+  Layer.provideMerge(Layer.mergeAll(Keybindings.layer, DelegationStoreLayer.layer)),
   Layer.provideMerge(ProviderRegistryLive),
   // The instance registry is the new routing keystone — text generation,
   // adapter lookup, and runtime ingestion all resolve `ProviderInstanceId`
@@ -474,6 +496,15 @@ export const makeRoutesLayer = Layer.mergeAll(
   // and mutations observed on WebSocket invalidate patches subsequently read over HTTP.
   Layer.provide(PullRequestServiceLive),
   Layer.provide(PreviewAutomationBroker.layer),
+  // Client command dispatch routes `agent.*` commands to the orchestration
+  // toolkit over HTTP and WebSocket, not just MCP. It stays requirement-open
+  // here: makeServerLayer puts the service (with its handler dependencies)
+  // into the ambient runtime environment, which is also what the WebSocket
+  // route reads when it builds a per-connection RPC layer.
+
+  // The orchestration MCP toolkit reads and writes delegation state. This is the
+  // same layer reference the runtime provides, so one MemoMap builds one client.
+  Layer.provide(SqlitePersistenceLayerLive),
   Layer.provide(ServerSelfUpdate.layer),
   Layer.provide(commandReadinessLayer),
   Layer.provide(browserApiCorsLayer),
@@ -511,6 +542,16 @@ export const makeServerLayer = Layer.unwrap(
           if (typeof address === "string" || !("port" in address)) {
             return;
           }
+
+          // Stamp the port onto the lock we already hold. It is only ever read
+          // by a *later* server's refusal message, which turns "something else
+          // is running" into an address the user can open.
+          yield* ServerSingleton.serverLockPath(config.stateDir).pipe(
+            Effect.flatMap((lockPath) =>
+              ServerSingleton.recordServerLockPort(lockPath, address.port),
+            ),
+            Effect.ignore,
+          );
 
           const state = yield* makePersistedServerRuntimeState({
             config,
@@ -683,9 +724,25 @@ export const makeServerLayer = Layer.unwrap(
 
     return serverApplicationLayer.pipe(
       Layer.provideMerge(runtimeServicesLive),
+      // The dispatch service (and the runner behind it) is an ambient runtime
+      // service: the WebSocket route builds per-connection RPC layers from the
+      // running environment, and the HTTP routes resolve the same instance.
+      // The store/roles/receipts layers are the same objects the runtime core
+      // merges, so the MemoMap builds one sqlite client and one delegation
+      // store across all of them.
+      Layer.provideMerge(
+        OrchestrationClientCommandDispatch.ClientOrchestrationCommandDispatchLive.pipe(
+          Layer.provide(OrchestrationCommandReceiptRepositoryLive),
+          Layer.provide(DelegationStoreLayer.layer),
+          Layer.provide(OrchestrationRolesLayer.layer),
+          Layer.provide(OrchestrationLayerLive),
+          Layer.provide(SqlitePersistenceLayerLive),
+          Layer.provide(RepositoryIdentityResolver.layer),
+        ),
+      ),
       Layer.provide(activationLayer),
       Layer.provideMerge(serverRelayBrokerTracingLayer),
-      Layer.provideMerge(HttpServerLive),
+      Layer.provideMerge(HttpServerLive.pipe(Layer.provide(ServerSingletonLive))),
       Layer.provide(ApplicationObservabilityLive),
       Layer.provideMerge(FetchHttpClient.layer),
       Layer.provideMerge(VcsProcess.layer),

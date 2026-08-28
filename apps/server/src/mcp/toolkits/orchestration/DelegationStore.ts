@@ -1,0 +1,748 @@
+/**
+ * Durable state for delegations and the thread inbox.
+ *
+ * ## Why these tables are created here instead of in `persistence/Migrations`
+ *
+ * This is a fork-local toolkit and rebasing onto upstream must stay trivial. A
+ * numbered migration file collides with the next number upstream adds, on every
+ * rebase, forever. These two tables are self-contained, additive, and created
+ * with `IF NOT EXISTS` when the layer builds, so they cost nothing to carry and
+ * nothing to drop.
+ *
+ * They live in the same `state.sqlite` as everything else, which keeps one
+ * database to back up, copy with `VACUUM INTO`, and reason about.
+ *
+ * ## What is authoritative here, and what is not
+ *
+ * These rows are the system of record for *delegation* state: who owns what,
+ * which lease is held, what the terminal handoff said. They are not a second
+ * copy of orchestration events. Thread and turn state stays in
+ * `orchestration_events`, and this store only ever holds locators into it.
+ *
+ * The write path is ordered so a crash is recoverable rather than silent: the
+ * row is inserted `pending` with its spawn command id *before* the command is
+ * dispatched. Command ids are deduplicated by `orchestration_command_receipts`,
+ * so re-dispatching a `pending` row's command returns the original sequence
+ * instead of creating a second child.
+ */
+import type { ThreadId } from "@t3tools/contracts";
+import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+
+import { type DelegationId, type DelegationState, OrchestrationToolkitError } from "./schemas.ts";
+
+export interface DelegationRow {
+  readonly delegationId: DelegationId;
+  readonly parentThreadId: ThreadId;
+  readonly childThreadId: ThreadId | null;
+  readonly role: string;
+  readonly providerInstanceId: string;
+  readonly model: string;
+  readonly state: DelegationState;
+  readonly objective: string;
+  readonly judgment: string;
+  readonly resourceLease: string | null;
+  readonly idempotencyKey: string | null;
+  readonly spawnCommandId: string;
+  readonly spawnSequence: number | null;
+  readonly handoffJson: string | null;
+  readonly deadlineAt: string | null;
+  readonly alertedAt: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+/** A live delegation plus evidence read from the child's own projections. */
+export interface DelegationProgressRow extends DelegationRow {
+  readonly lastActivityAt: string | null;
+  readonly latestTurnState: string | null;
+  /**
+   * How many times the child called the handoff tool and had its arguments
+   * rejected. A self-hosted implementer can emit a well-formed call with empty
+   * arguments, which is indistinguishable from never calling at all unless the
+   * attempt is counted.
+   */
+  readonly rejectedHandoffAttempts: number;
+}
+
+export interface InboxRow {
+  readonly messageId: string;
+  readonly fromThreadId: ThreadId;
+  readonly fromDelegationId: DelegationId | null;
+  readonly toThreadId: ThreadId;
+  readonly body: string;
+  readonly deliveredAt: string | null;
+  readonly createdAt: string;
+}
+
+export interface PendingSettleRow {
+  readonly threadId: ThreadId;
+  readonly requestedAt: string;
+  /** Live session status, or null when the thread has no session row. */
+  readonly sessionStatus: string | null;
+}
+
+export interface InsertPendingInput {
+  readonly delegationId: DelegationId;
+  readonly parentThreadId: ThreadId;
+  readonly role: string;
+  readonly providerInstanceId: string;
+  readonly model: string;
+  readonly objective: string;
+  readonly judgment: string;
+  readonly resourceLease: string | undefined;
+  readonly idempotencyKey: string | undefined;
+  readonly spawnCommandId: string;
+  readonly deadlineAt: string | undefined;
+}
+
+export interface DelegationStoreShape {
+  readonly listLiveWithProgress: () => Effect.Effect<
+    ReadonlyArray<DelegationProgressRow>,
+    OrchestrationToolkitError
+  >;
+  readonly markFailed: (
+    delegationId: DelegationId,
+    abandonedJson: string,
+  ) => Effect.Effect<void, OrchestrationToolkitError>;
+  /** Returns true when this call is the one that claimed the alert. */
+  readonly markAlerted: (
+    delegationId: DelegationId,
+  ) => Effect.Effect<boolean, OrchestrationToolkitError>;
+  readonly findById: (
+    delegationId: DelegationId,
+  ) => Effect.Effect<DelegationRow | undefined, OrchestrationToolkitError>;
+  readonly findByChildThread: (
+    childThreadId: ThreadId,
+  ) => Effect.Effect<DelegationRow | undefined, OrchestrationToolkitError>;
+  readonly findByIdempotencyKey: (
+    parentThreadId: ThreadId,
+    idempotencyKey: string,
+  ) => Effect.Effect<DelegationRow | undefined, OrchestrationToolkitError>;
+  readonly findLiveByLease: (
+    resourceLease: string,
+  ) => Effect.Effect<DelegationRow | undefined, OrchestrationToolkitError>;
+  readonly listByParent: (
+    parentThreadId: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<DelegationRow>, OrchestrationToolkitError>;
+  readonly insertPending: (
+    input: InsertPendingInput,
+  ) => Effect.Effect<void, OrchestrationToolkitError>;
+  readonly markRunning: (
+    delegationId: DelegationId,
+    childThreadId: ThreadId,
+    spawnSequence: number,
+  ) => Effect.Effect<void, OrchestrationToolkitError>;
+  readonly markTerminal: (
+    delegationId: DelegationId,
+    state: DelegationState,
+    handoffJson: string,
+  ) => Effect.Effect<void, OrchestrationToolkitError>;
+  /**
+   * How many delegation hops separate this thread from an operator-started one.
+   * An operator-started thread is depth 0.
+   */
+  readonly depthOf: (threadId: ThreadId) => Effect.Effect<number, OrchestrationToolkitError>;
+  readonly enqueueMessage: (input: {
+    readonly messageId: string;
+    readonly fromThreadId: ThreadId;
+    readonly fromDelegationId: DelegationId | undefined;
+    readonly toThreadId: ThreadId;
+    readonly body: string;
+  }) => Effect.Effect<boolean, OrchestrationToolkitError>;
+  readonly readInbox: (
+    toThreadId: ThreadId,
+    includeDelivered: boolean,
+  ) => Effect.Effect<ReadonlyArray<InboxRow>, OrchestrationToolkitError>;
+  readonly markDelivered: (
+    messageIds: ReadonlyArray<string>,
+  ) => Effect.Effect<void, OrchestrationToolkitError>;
+  readonly requestSettle: (threadId: ThreadId) => Effect.Effect<void, OrchestrationToolkitError>;
+  /** Threads that asked to settle and have not been settled yet. */
+  readonly pendingSettleRequests: () => Effect.Effect<
+    ReadonlyArray<PendingSettleRow>,
+    OrchestrationToolkitError
+  >;
+  readonly markSettleApplied: (
+    threadId: ThreadId,
+  ) => Effect.Effect<void, OrchestrationToolkitError>;
+  /**
+   * Reads back whether a thread is explicitly settled.
+   *
+   * The projection is the only place that answers "did the settle actually
+   * apply". A dispatch receipt says the command was accepted, which is a
+   * different question, and `settled` is not sticky besides: the server clears
+   * the override the moment real activity arrives.
+   */
+  readonly settledOverrideOfThread: (
+    threadId: ThreadId,
+  ) => Effect.Effect<string | undefined, OrchestrationToolkitError>;
+  /** Resolves the project a thread belongs to, needed to create a sibling. */
+  readonly projectIdOfThread: (
+    threadId: ThreadId,
+  ) => Effect.Effect<string | undefined, OrchestrationToolkitError>;
+  readonly worktreePathOfThread: (
+    threadId: ThreadId,
+  ) => Effect.Effect<string | undefined, OrchestrationToolkitError>;
+  /**
+   * The delegation (if any) whose live child is this thread. The waker reads
+   * this on every child turn-end; an unrelated thread resolves to undefined
+   * and wakes nobody.
+   */
+  readonly findLiveByChildThread: (
+    childThreadId: ThreadId,
+  ) => Effect.Effect<DelegationRow | undefined, OrchestrationToolkitError>;
+  /**
+   * The most recent terminal turn id (completed/error) recorded for a thread,
+   * or null when it has none. Names the idempotency key for one wake per child
+   * terminal turn.
+   */
+  readonly latestTerminalTurnIdOfThread: (
+    threadId: ThreadId,
+  ) => Effect.Effect<string | null, OrchestrationToolkitError>;
+}
+
+export class DelegationStore extends Context.Service<DelegationStore, DelegationStoreShape>()(
+  "t3/mcp/toolkits/orchestration/DelegationStore",
+) {}
+
+const storageFailed = (operation: string) => (cause: unknown) =>
+  new OrchestrationToolkitError({
+    reason: "storage_failed",
+    detail: `${operation} failed: ${String(cause)}`,
+  });
+
+const makeDelegationStore = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const isoNow = DateTime.now.pipe(Effect.map(DateTime.formatIso));
+
+  yield* Effect.all([
+    sql`
+      CREATE TABLE IF NOT EXISTS orchestration_delegations (
+        delegation_id TEXT PRIMARY KEY,
+        parent_thread_id TEXT NOT NULL,
+        child_thread_id TEXT,
+        role TEXT NOT NULL,
+        provider_instance_id TEXT NOT NULL,
+        model TEXT NOT NULL,
+        state TEXT NOT NULL,
+        objective TEXT NOT NULL,
+        judgment TEXT NOT NULL,
+        resource_lease TEXT,
+        idempotency_key TEXT,
+        spawn_command_id TEXT NOT NULL UNIQUE,
+        spawn_sequence INTEGER,
+        handoff_json TEXT,
+        deadline_at TEXT,
+        alerted_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `,
+    sql`
+      CREATE INDEX IF NOT EXISTS orchestration_delegations_parent
+        ON orchestration_delegations (parent_thread_id)
+    `,
+    sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS orchestration_delegations_child
+        ON orchestration_delegations (child_thread_id)
+        WHERE child_thread_id IS NOT NULL
+    `,
+    // Two live delegations may never hold one resource. Enforced by the database
+    // rather than a read-then-write check, which races under concurrent spawns.
+    sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS orchestration_delegations_live_lease
+        ON orchestration_delegations (resource_lease)
+        WHERE resource_lease IS NOT NULL AND state IN ('pending', 'running')
+    `,
+    sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS orchestration_delegations_idempotency
+        ON orchestration_delegations (parent_thread_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL
+    `,
+    sql`
+      CREATE TABLE IF NOT EXISTS orchestration_messages (
+        message_id TEXT PRIMARY KEY,
+        from_thread_id TEXT NOT NULL,
+        from_delegation_id TEXT,
+        to_thread_id TEXT NOT NULL,
+        body TEXT NOT NULL,
+        delivered_at TEXT,
+        created_at TEXT NOT NULL
+      )
+    `,
+    sql`
+      CREATE INDEX IF NOT EXISTS orchestration_messages_recipient
+        ON orchestration_messages (to_thread_id, delivered_at)
+    `,
+    // A thread cannot settle itself while it is mid-turn: `thread.settle` is
+    // rejected outright when the session is starting/running, and a thread is
+    // always running while its own agent calls a tool. So the request is
+    // recorded here and applied the next time the thread is observed idle.
+    sql`
+      CREATE TABLE IF NOT EXISTS orchestration_settle_requests (
+        thread_id TEXT PRIMARY KEY,
+        requested_at TEXT NOT NULL,
+        applied_at TEXT
+      )
+    `,
+  ]).pipe(Effect.mapError(storageFailed("DelegationStore.ensureSchema")));
+
+  // A database created before staleness tracking existed still has the table,
+  // so `CREATE TABLE IF NOT EXISTS` above is a no-op for it. Add the columns the
+  // same way the repo's own migrations do.
+  const existingColumns = yield* sql<{ readonly name: string }>`
+    PRAGMA table_info(orchestration_delegations)
+  `.pipe(Effect.mapError(storageFailed("DelegationStore.inspectColumns")));
+  const columnNames = new Set(existingColumns.map((column) => column.name));
+  if (!columnNames.has("deadline_at")) {
+    yield* sql`ALTER TABLE orchestration_delegations ADD COLUMN deadline_at TEXT`.pipe(
+      Effect.mapError(storageFailed("DelegationStore.addDeadlineColumn")),
+    );
+  }
+  if (!columnNames.has("alerted_at")) {
+    yield* sql`ALTER TABLE orchestration_delegations ADD COLUMN alerted_at TEXT`.pipe(
+      Effect.mapError(storageFailed("DelegationStore.addAlertedColumn")),
+    );
+  }
+
+  const delegationColumns = sql`
+    delegation_id AS "delegationId",
+    parent_thread_id AS "parentThreadId",
+    child_thread_id AS "childThreadId",
+    role,
+    provider_instance_id AS "providerInstanceId",
+    model,
+    state,
+    objective,
+    judgment,
+    resource_lease AS "resourceLease",
+    idempotency_key AS "idempotencyKey",
+    spawn_command_id AS "spawnCommandId",
+    spawn_sequence AS "spawnSequence",
+    handoff_json AS "handoffJson",
+    deadline_at AS "deadlineAt",
+    alerted_at AS "alertedAt",
+    created_at AS "createdAt",
+    updated_at AS "updatedAt"
+  `;
+
+  const messageColumns = sql`
+    message_id AS "messageId",
+    from_thread_id AS "fromThreadId",
+    from_delegation_id AS "fromDelegationId",
+    to_thread_id AS "toThreadId",
+    body,
+    delivered_at AS "deliveredAt",
+    created_at AS "createdAt"
+  `;
+
+  const findById: DelegationStoreShape["findById"] = Effect.fn("DelegationStore.findById")(
+    function* (delegationId) {
+      const rows = yield* sql<DelegationRow>`
+        SELECT ${delegationColumns} FROM orchestration_delegations
+        WHERE delegation_id = ${delegationId}
+      `;
+      return rows[0];
+    },
+    Effect.mapError(storageFailed("DelegationStore.findById")),
+  );
+
+  const findByChildThread: DelegationStoreShape["findByChildThread"] = Effect.fn(
+    "DelegationStore.findByChildThread",
+  )(
+    function* (childThreadId) {
+      const rows = yield* sql<DelegationRow>`
+        SELECT ${delegationColumns} FROM orchestration_delegations
+        WHERE child_thread_id = ${childThreadId}
+      `;
+      return rows[0];
+    },
+    Effect.mapError(storageFailed("DelegationStore.findByChildThread")),
+  );
+
+  const findByIdempotencyKey: DelegationStoreShape["findByIdempotencyKey"] = Effect.fn(
+    "DelegationStore.findByIdempotencyKey",
+  )(
+    function* (parentThreadId, idempotencyKey) {
+      const rows = yield* sql<DelegationRow>`
+        SELECT ${delegationColumns} FROM orchestration_delegations
+        WHERE parent_thread_id = ${parentThreadId} AND idempotency_key = ${idempotencyKey}
+      `;
+      return rows[0];
+    },
+    Effect.mapError(storageFailed("DelegationStore.findByIdempotencyKey")),
+  );
+
+  const findLiveByLease: DelegationStoreShape["findLiveByLease"] = Effect.fn(
+    "DelegationStore.findLiveByLease",
+  )(
+    function* (resourceLease) {
+      const rows = yield* sql<DelegationRow>`
+        SELECT ${delegationColumns} FROM orchestration_delegations
+        WHERE resource_lease = ${resourceLease} AND state IN ('pending', 'running')
+      `;
+      return rows[0];
+    },
+    Effect.mapError(storageFailed("DelegationStore.findLiveByLease")),
+  );
+
+  const listByParent: DelegationStoreShape["listByParent"] = Effect.fn(
+    "DelegationStore.listByParent",
+  )(
+    function* (parentThreadId) {
+      return yield* sql<DelegationRow>`
+        SELECT ${delegationColumns} FROM orchestration_delegations
+        WHERE parent_thread_id = ${parentThreadId}
+        ORDER BY created_at ASC
+      `;
+    },
+    Effect.mapError(storageFailed("DelegationStore.listByParent")),
+  );
+
+  /**
+   * Live delegations with the child's own progress evidence attached.
+   *
+   * Both evidence columns are subqueries over projections this toolkit does not
+   * own and never writes. That is the whole point: staleness cannot be refreshed
+   * by the code that checks for it.
+   */
+  const listLiveWithProgress: DelegationStoreShape["listLiveWithProgress"] = Effect.fn(
+    "DelegationStore.listLiveWithProgress",
+  )(
+    function* () {
+      return yield* sql<DelegationProgressRow>`
+        SELECT ${delegationColumns},
+          (
+            SELECT MAX(a.created_at) FROM projection_thread_activities a
+            WHERE a.thread_id = orchestration_delegations.child_thread_id
+          ) AS "lastActivityAt",
+          (
+            SELECT t.state FROM projection_turns t
+            WHERE t.thread_id = orchestration_delegations.child_thread_id
+            ORDER BY t.row_id DESC LIMIT 1
+          ) AS "latestTurnState",
+          (
+            SELECT COUNT(*) FROM projection_thread_activities r
+            WHERE r.thread_id = orchestration_delegations.child_thread_id
+              AND r.kind LIKE 'tool.%'
+              AND r.payload_json LIKE '%agent_handoff%'
+              AND r.payload_json LIKE '%invalid%'
+          ) AS "rejectedHandoffAttempts"
+        FROM orchestration_delegations
+        WHERE state IN ('pending', 'running')
+        ORDER BY created_at ASC
+      `;
+    },
+    Effect.mapError(storageFailed("DelegationStore.listLiveWithProgress")),
+  );
+
+  const markFailed: DelegationStoreShape["markFailed"] = Effect.fn("DelegationStore.markFailed")(
+    function* (delegationId, abandonedJson) {
+      const now = yield* isoNow;
+      yield* sql`
+        UPDATE orchestration_delegations
+        SET state = 'failed',
+            handoff_json = ${abandonedJson},
+            updated_at = ${now}
+        WHERE delegation_id = ${delegationId} AND state IN ('pending', 'running')
+      `;
+    },
+    Effect.mapError(storageFailed("DelegationStore.markFailed")),
+  );
+
+  /**
+   * Records that a stale delegation has been reported once.
+   *
+   * Deliberately a one-shot stamp rather than a recurring notice: an alert that
+   * re-fires every sweep is the same noise as a heartbeat that never moves.
+   */
+  const markAlerted: DelegationStoreShape["markAlerted"] = Effect.fn("DelegationStore.markAlerted")(
+    function* (delegationId) {
+      const now = yield* isoNow;
+      const updated = yield* sql`
+        UPDATE orchestration_delegations
+        SET alerted_at = ${now}
+        WHERE delegation_id = ${delegationId} AND alerted_at IS NULL
+        RETURNING delegation_id AS "delegationId"
+      `;
+      return updated.length > 0;
+    },
+    Effect.mapError(storageFailed("DelegationStore.markAlerted")),
+  );
+
+  const insertPending: DelegationStoreShape["insertPending"] = Effect.fn(
+    "DelegationStore.insertPending",
+  )(function* (input) {
+    const now = yield* isoNow;
+    yield* sql`
+      INSERT INTO orchestration_delegations (
+        delegation_id, parent_thread_id, child_thread_id, role, provider_instance_id,
+        model, state, objective, judgment, resource_lease, idempotency_key,
+        spawn_command_id, spawn_sequence, handoff_json, deadline_at, alerted_at,
+        created_at, updated_at
+      ) VALUES (
+        ${input.delegationId}, ${input.parentThreadId}, NULL, ${input.role},
+        ${input.providerInstanceId}, ${input.model}, 'pending', ${input.objective},
+        ${input.judgment}, ${input.resourceLease ?? null}, ${input.idempotencyKey ?? null},
+        ${input.spawnCommandId}, NULL, NULL, ${input.deadlineAt ?? null}, NULL, ${now}, ${now}
+      )
+    `.pipe(
+      // The lease index is the concurrent-spawn guard, so a rejected insert is
+      // usually a lease conflict. Which one it was is decided by re-reading the
+      // holder rather than by matching driver error text, which is not a
+      // contract and differs between SQLite builds.
+      Effect.catch((cause) =>
+        Effect.gen(function* () {
+          if (input.resourceLease === undefined) {
+            return yield* storageFailed("DelegationStore.insertPending")(cause);
+          }
+          const holder = yield* findLiveByLease(input.resourceLease);
+          return yield* holder
+            ? new OrchestrationToolkitError({
+                reason: "lease_held",
+                detail: `Delegation ${holder.delegationId} (${holder.role}, ${holder.state}) already holds the lease ${input.resourceLease}.`,
+              })
+            : storageFailed("DelegationStore.insertPending")(cause);
+        }),
+      ),
+    );
+  });
+
+  const markRunning: DelegationStoreShape["markRunning"] = Effect.fn("DelegationStore.markRunning")(
+    function* (delegationId, childThreadId, spawnSequence) {
+      const now = yield* isoNow;
+      yield* sql`
+        UPDATE orchestration_delegations
+        SET state = 'running',
+            child_thread_id = ${childThreadId},
+            spawn_sequence = ${spawnSequence},
+            updated_at = ${now}
+        WHERE delegation_id = ${delegationId} AND state = 'pending'
+      `;
+    },
+    Effect.mapError(storageFailed("DelegationStore.markRunning")),
+  );
+
+  const markTerminal: DelegationStoreShape["markTerminal"] = Effect.fn(
+    "DelegationStore.markTerminal",
+  )(
+    function* (delegationId, state, handoffJson) {
+      const now = yield* isoNow;
+      // Terminal only from `running`: a delegation cannot be completed twice,
+      // and one that never started cannot be reported on.
+      yield* sql`
+        UPDATE orchestration_delegations
+        SET state = ${state},
+            handoff_json = ${handoffJson},
+            updated_at = ${now}
+        WHERE delegation_id = ${delegationId} AND state = 'running'
+      `;
+    },
+    Effect.mapError(storageFailed("DelegationStore.markTerminal")),
+  );
+
+  const depthOf: DelegationStoreShape["depthOf"] = Effect.fn("DelegationStore.depthOf")(
+    function* (threadId) {
+      let depth = 0;
+      let cursor: ThreadId | null = threadId;
+      const seen = new Set<string>();
+      while (cursor !== null && !seen.has(cursor)) {
+        seen.add(cursor);
+        const parent: DelegationRow | undefined = yield* findByChildThread(cursor);
+        if (!parent) break;
+        depth += 1;
+        cursor = parent.parentThreadId;
+      }
+      return depth;
+    },
+  );
+
+  const enqueueMessage: DelegationStoreShape["enqueueMessage"] = Effect.fn(
+    "DelegationStore.enqueueMessage",
+  )(
+    function* (input) {
+      const now = yield* isoNow;
+      const inserted = yield* sql`
+        INSERT INTO orchestration_messages (
+          message_id, from_thread_id, from_delegation_id, to_thread_id, body, delivered_at, created_at
+        ) VALUES (
+          ${input.messageId}, ${input.fromThreadId}, ${input.fromDelegationId ?? null},
+          ${input.toThreadId}, ${input.body}, NULL, ${now}
+        )
+        ON CONFLICT (message_id) DO NOTHING
+        RETURNING message_id AS "messageId"
+      `;
+      return inserted.length > 0;
+    },
+    Effect.mapError(storageFailed("DelegationStore.enqueueMessage")),
+  );
+
+  const readInbox: DelegationStoreShape["readInbox"] = Effect.fn("DelegationStore.readInbox")(
+    function* (toThreadId, includeDelivered) {
+      return yield* sql<InboxRow>`
+        SELECT ${messageColumns} FROM orchestration_messages
+        WHERE to_thread_id = ${toThreadId}
+          AND (${includeDelivered ? 1 : 0} = 1 OR delivered_at IS NULL)
+        ORDER BY created_at ASC
+      `;
+    },
+    Effect.mapError(storageFailed("DelegationStore.readInbox")),
+  );
+
+  const markDelivered: DelegationStoreShape["markDelivered"] = Effect.fn(
+    "DelegationStore.markDelivered",
+  )(
+    function* (messageIds) {
+      if (messageIds.length === 0) return;
+      const now = yield* isoNow;
+      yield* sql`
+        UPDATE orchestration_messages
+        SET delivered_at = ${now}
+        WHERE message_id IN ${sql.in(messageIds)}
+      `;
+    },
+    Effect.mapError(storageFailed("DelegationStore.markDelivered")),
+  );
+
+  const requestSettle: DelegationStoreShape["requestSettle"] = Effect.fn(
+    "DelegationStore.requestSettle",
+  )(
+    function* (threadId) {
+      const now = yield* isoNow;
+      yield* sql`
+        INSERT INTO orchestration_settle_requests (thread_id, requested_at, applied_at)
+        VALUES (${threadId}, ${now}, NULL)
+        ON CONFLICT (thread_id) DO UPDATE SET requested_at = excluded.requested_at, applied_at = NULL
+      `;
+    },
+    Effect.mapError(storageFailed("DelegationStore.requestSettle")),
+  );
+
+  const pendingSettleRequests: DelegationStoreShape["pendingSettleRequests"] = Effect.fn(
+    "DelegationStore.pendingSettleRequests",
+  )(
+    function* () {
+      return yield* sql<PendingSettleRow>`
+        SELECT r.thread_id AS "threadId",
+               r.requested_at AS "requestedAt",
+               (
+                 SELECT s.status FROM projection_thread_sessions s
+                 WHERE s.thread_id = r.thread_id
+               ) AS "sessionStatus"
+        FROM orchestration_settle_requests r
+        WHERE r.applied_at IS NULL
+        ORDER BY r.requested_at ASC
+      `;
+    },
+    Effect.mapError(storageFailed("DelegationStore.pendingSettleRequests")),
+  );
+
+  const markSettleApplied: DelegationStoreShape["markSettleApplied"] = Effect.fn(
+    "DelegationStore.markSettleApplied",
+  )(
+    function* (threadId) {
+      const now = yield* isoNow;
+      yield* sql`
+        UPDATE orchestration_settle_requests SET applied_at = ${now} WHERE thread_id = ${threadId}
+      `;
+    },
+    Effect.mapError(storageFailed("DelegationStore.markSettleApplied")),
+  );
+
+  const settledOverrideOfThread: DelegationStoreShape["settledOverrideOfThread"] = Effect.fn(
+    "DelegationStore.settledOverrideOfThread",
+  )(
+    function* (threadId) {
+      const rows = yield* sql<{ readonly settledOverride: string | null }>`
+        SELECT settled_override AS "settledOverride" FROM projection_threads
+        WHERE thread_id = ${threadId}
+      `;
+      return rows[0]?.settledOverride ?? undefined;
+    },
+    Effect.mapError(storageFailed("DelegationStore.settledOverrideOfThread")),
+  );
+
+  const projectIdOfThread: DelegationStoreShape["projectIdOfThread"] = Effect.fn(
+    "DelegationStore.projectIdOfThread",
+  )(
+    function* (threadId) {
+      const rows = yield* sql<{ readonly projectId: string }>`
+        SELECT project_id AS "projectId" FROM projection_threads
+        WHERE thread_id = ${threadId}
+      `;
+      return rows[0]?.projectId;
+    },
+    Effect.mapError(storageFailed("DelegationStore.projectIdOfThread")),
+  );
+
+  const worktreePathOfThread: DelegationStoreShape["worktreePathOfThread"] = Effect.fn(
+    "DelegationStore.worktreePathOfThread",
+  )(
+    function* (threadId) {
+      const rows = yield* sql<{ readonly worktreePath: string | null }>`
+        SELECT worktree_path AS "worktreePath" FROM projection_threads
+        WHERE thread_id = ${threadId}
+      `;
+      return rows[0]?.worktreePath ?? undefined;
+    },
+    Effect.mapError(storageFailed("DelegationStore.worktreePathOfThread")),
+  );
+
+  const findLiveByChildThread: DelegationStoreShape["findLiveByChildThread"] = Effect.fn(
+    "DelegationStore.findLiveByChildThread",
+  )(
+    function* (childThreadId) {
+      const rows = yield* sql<DelegationRow>`
+        SELECT ${delegationColumns} FROM orchestration_delegations
+        WHERE child_thread_id = ${childThreadId} AND state IN ('pending', 'running')
+      `;
+      return rows[0];
+    },
+    Effect.mapError(storageFailed("DelegationStore.findLiveByChildThread")),
+  );
+
+  const latestTerminalTurnIdOfThread: DelegationStoreShape["latestTerminalTurnIdOfThread"] =
+    Effect.fn("DelegationStore.latestTerminalTurnIdOfThread")(
+      function* (threadId) {
+        const rows = yield* sql<{ readonly turnId: string | null }>`
+          SELECT turn_id AS "turnId" FROM projection_turns
+          WHERE thread_id = ${threadId} AND state IN ('completed', 'error') AND turn_id IS NOT NULL
+          ORDER BY row_id DESC LIMIT 1
+        `;
+        return rows[0]?.turnId ?? null;
+      },
+      Effect.mapError(storageFailed("DelegationStore.latestTerminalTurnIdOfThread")),
+    );
+
+  return DelegationStore.of({
+    listLiveWithProgress,
+    markFailed,
+    markAlerted,
+    findById,
+    findByChildThread,
+    findByIdempotencyKey,
+    findLiveByLease,
+    listByParent,
+    insertPending,
+    markRunning,
+    markTerminal,
+    depthOf,
+    enqueueMessage,
+    readInbox,
+    markDelivered,
+    requestSettle,
+    pendingSettleRequests,
+    markSettleApplied,
+    settledOverrideOfThread,
+    projectIdOfThread,
+    worktreePathOfThread,
+    findLiveByChildThread,
+    latestTerminalTurnIdOfThread,
+  });
+});
+
+export const layer = Layer.effect(DelegationStore, makeDelegationStore);
