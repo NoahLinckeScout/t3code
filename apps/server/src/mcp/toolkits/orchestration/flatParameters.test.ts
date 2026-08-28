@@ -31,6 +31,7 @@ import {
   AgentMessageTool,
   AgentSettleSelfTool,
   AgentSpawnTool,
+  AgentWhoamiTool,
   OrchestrationToolkit,
 } from "./tools.ts";
 
@@ -40,6 +41,7 @@ const tools = [
   AgentMessageTool,
   AgentInboxTool,
   AgentSettleSelfTool,
+  AgentWhoamiTool,
 ];
 
 interface JsonSchema {

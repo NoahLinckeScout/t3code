@@ -112,6 +112,10 @@ import * as ResourceMonitorBinary from "./resourceTelemetry/ResourceMonitorBinar
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
+import * as OrchestrationClientCommandDispatch from "./orchestration/Services/ClientOrchestrationCommandDispatch.ts";
+import * as DelegationStoreLayer from "./mcp/toolkits/orchestration/DelegationStore.ts";
+import * as OrchestrationRolesLayer from "./mcp/toolkits/orchestration/roles.ts";
+import { OrchestrationCommandReceiptRepositoryLive } from "./persistence/Layers/OrchestrationCommandReceipts.ts";
 import {
   clearPersistedServerRuntimeState,
   makePersistedServerRuntimeState,
@@ -398,7 +402,10 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(ProviderRuntimeLayerLive),
   Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive)),
   Layer.provideMerge(PersistenceLayerLive),
-  Layer.provideMerge(Keybindings.layer),
+  // The delegation wake reactor (part of the orchestration reactors above)
+  // reads live delegations through the same sqlite-backed store the MCP
+  // toolkit uses; merged with persistence so both build on one SqlClient.
+  Layer.provideMerge(Layer.mergeAll(Keybindings.layer, DelegationStoreLayer.layer)),
   Layer.provideMerge(ProviderRegistryLive),
   // The instance registry is the new routing keystone — text generation,
   // adapter lookup, and runtime ingestion all resolve `ProviderInstanceId`
@@ -489,6 +496,12 @@ export const makeRoutesLayer = Layer.mergeAll(
   // and mutations observed on WebSocket invalidate patches subsequently read over HTTP.
   Layer.provide(PullRequestServiceLive),
   Layer.provide(PreviewAutomationBroker.layer),
+  // Client command dispatch routes `agent.*` commands to the orchestration
+  // toolkit over HTTP and WebSocket, not just MCP. It stays requirement-open
+  // here: makeServerLayer puts the service (with its handler dependencies)
+  // into the ambient runtime environment, which is also what the WebSocket
+  // route reads when it builds a per-connection RPC layer.
+
   // The orchestration MCP toolkit reads and writes delegation state. This is the
   // same layer reference the runtime provides, so one MemoMap builds one client.
   Layer.provide(SqlitePersistenceLayerLive),
@@ -711,6 +724,22 @@ export const makeServerLayer = Layer.unwrap(
 
     return serverApplicationLayer.pipe(
       Layer.provideMerge(runtimeServicesLive),
+      // The dispatch service (and the runner behind it) is an ambient runtime
+      // service: the WebSocket route builds per-connection RPC layers from the
+      // running environment, and the HTTP routes resolve the same instance.
+      // The store/roles/receipts layers are the same objects the runtime core
+      // merges, so the MemoMap builds one sqlite client and one delegation
+      // store across all of them.
+      Layer.provideMerge(
+        OrchestrationClientCommandDispatch.ClientOrchestrationCommandDispatchLive.pipe(
+          Layer.provide(OrchestrationCommandReceiptRepositoryLive),
+          Layer.provide(DelegationStoreLayer.layer),
+          Layer.provide(OrchestrationRolesLayer.layer),
+          Layer.provide(OrchestrationLayerLive),
+          Layer.provide(SqlitePersistenceLayerLive),
+          Layer.provide(RepositoryIdentityResolver.layer),
+        ),
+      ),
       Layer.provide(activationLayer),
       Layer.provideMerge(serverRelayBrokerTracingLayer),
       Layer.provideMerge(HttpServerLive.pipe(Layer.provide(ServerSingletonLive))),
