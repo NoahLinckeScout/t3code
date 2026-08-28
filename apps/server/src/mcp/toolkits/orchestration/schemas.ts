@@ -7,7 +7,12 @@
  * are reached over the per-thread MCP endpoint, which carries its own JSON
  * schema derived from these definitions.
  */
-import { NonNegativeInt, ThreadId, TrimmedNonEmptyString } from "@t3tools/contracts";
+import {
+  AgentDelegationHandoff,
+  NonNegativeInt,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
 /**
@@ -20,6 +25,13 @@ import * as Schema from "effect/Schema";
  */
 export const DelegationId = TrimmedNonEmptyString.pipe(Schema.brand("DelegationId"));
 export type DelegationId = typeof DelegationId.Type;
+
+/**
+ * The terminal report a child owes its parent, shared with the dispatch
+ * commands so MCP and `POST /api/orchestration/dispatch` validate one struct.
+ */
+export const DelegationHandoff = AgentDelegationHandoff;
+export type DelegationHandoff = typeof DelegationHandoff.Type;
 
 export const OrchestrationMessageId = TrimmedNonEmptyString.pipe(
   Schema.brand("OrchestrationMessageId"),
@@ -49,36 +61,10 @@ export type DelegationState = typeof DelegationState.Type;
 export const MAX_BRIEF_BYTES = 64 * 1024;
 
 /**
- * The terminal report a child owes its parent.
- *
- * Deliberately free of repository, branch, and head fields. The reference
- * implementation this generalizes required them, which quietly made every
- * delegation a Git delegation. A caller with a repository to report puts it in
- * `artifacts`.
- *
  * The struct is closed, so "brief, not transcript" is enforced by shape as well
  * as by size: there is nowhere to attach a conversation, and the fields that do
  * exist are short strings whose total is bounded by `MAX_BRIEF_BYTES`.
  */
-export const DelegationHandoff = Schema.Struct({
-  status: Schema.Literals(["completed", "blocked"]),
-  summary: TrimmedNonEmptyString.annotate({
-    description: "What was done or what blocked, in a few sentences. Not a transcript.",
-  }),
-  artifacts: Schema.Array(TrimmedNonEmptyString).annotate({
-    description:
-      "Durable locations a reader can open: file paths, PR urls, commit shas. Never pasted content.",
-  }),
-  validation: Schema.Array(TrimmedNonEmptyString).annotate({
-    description:
-      "Commands actually run and their results. Required when status is completed; claiming completion with no evidence is rejected.",
-  }),
-  remainingRisks: Schema.Array(TrimmedNonEmptyString),
-  nextStep: TrimmedNonEmptyString.annotate({
-    description: "The single next action you recommend, or the decision you need from the parent.",
-  }),
-});
-export type DelegationHandoff = typeof DelegationHandoff.Type;
 
 export const DelegationHandoffFromJson = Schema.fromJsonString(DelegationHandoff);
 
@@ -142,6 +128,7 @@ export const SpawnResult = Schema.Struct({
   childThreadId: ThreadId,
   replayed: Schema.Boolean,
 });
+export type SpawnResult = typeof SpawnResult.Type;
 
 /**
  * Fields at the top level, identical to {@link DelegationHandoff}.
@@ -169,6 +156,7 @@ export const HandoffResult = Schema.Struct({
   state: DelegationState,
   parentThreadId: ThreadId,
 });
+export type HandoffResult = typeof HandoffResult.Type;
 
 /**
  * Addressed by delegation, never by raw thread.
@@ -203,6 +191,7 @@ export const MessageResult = Schema.Struct({
    */
   wokeRecipient: Schema.Boolean,
 });
+export type MessageResult = typeof MessageResult.Type;
 
 /**
  * No fields at all, and that is the design.
@@ -226,6 +215,7 @@ export const SettleSelfResult = Schema.Struct({
    */
   deferredReason: Schema.NullOr(Schema.String),
 });
+export type SettleSelfResult = typeof SettleSelfResult.Type;
 
 export const InboxInput = Schema.Struct({
   includeDelivered: Schema.optional(Schema.Boolean),
@@ -270,6 +260,18 @@ export const InboxResult = Schema.Struct({
   /** How many of your delegations have stopped showing evidence of progress. */
   staleCount: NonNegativeInt,
 });
+export type InboxResult = typeof InboxResult.Type;
+
+/**
+ * No arguments, like `agent_settle_self`: the answer is the calling thread, and
+ * a caller-supplied id would defeat the only reason to ask.
+ */
+export const WhoamiInput = Schema.Struct({});
+
+export const WhoamiResult = Schema.Struct({
+  threadId: ThreadId,
+});
+export type WhoamiResult = typeof WhoamiResult.Type;
 
 export const OrchestrationToolkitErrorReason = Schema.Literals([
   "roles_config_missing",
@@ -282,6 +284,7 @@ export const OrchestrationToolkitErrorReason = Schema.Literals([
   "delegation_not_live",
   "handoff_rejected",
   "message_rejected",
+  "self_not_bound",
   "dispatch_failed",
   "storage_failed",
 ]);

@@ -80,6 +80,7 @@ import {
   normalizeDispatchCommand,
 } from "./orchestration/Normalizer.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
+import * as ClientOrchestrationCommandDispatchModule from "./orchestration/Services/ClientOrchestrationCommandDispatch.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
   observeRpcEffect as instrumentRpcEffect,
@@ -431,6 +432,8 @@ const makeWsRpcLayer = (
       const crypto = yield* Crypto.Crypto;
       const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
+      const clientCommandDispatch =
+        yield* ClientOrchestrationCommandDispatchModule.ClientOrchestrationCommandDispatch;
       const analytics = yield* AnalyticsService.AnalyticsService;
       // Every command dispatched on this connection carries the connecting
       // client's origin, including server-generated bootstrap sub-commands:
@@ -1097,11 +1100,16 @@ const makeWsRpcLayer = (
         const dispatchEffect =
           normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
             ? dispatchBootstrapTurnStart(normalizedCommand)
-            : dispatchFromClient(normalizedCommand).pipe(
-                Effect.mapError((cause) =>
-                  toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
-                ),
-              );
+            : // The dispatch boundary intercepts `agent.*` commands for the
+              // agent command runner; everything else reaches the engine with
+              // the client origin stamped as before.
+              clientCommandDispatch
+                .dispatch(normalizedCommand, hasClientOrigin ? { origin: clientOrigin } : undefined)
+                .pipe(
+                  Effect.mapError((cause) =>
+                    toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
+                  ),
+                );
 
         return startup
           .enqueueCommand(dispatchEffect)

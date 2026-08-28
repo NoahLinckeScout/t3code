@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { ThreadId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -11,7 +11,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { OrchestrationCommandInvariantError } from "../../../orchestration/Errors.ts";
 import { OrchestrationEngineService } from "../../../orchestration/Services/OrchestrationEngine.ts";
 import { SqlitePersistenceMemory } from "../../../persistence/Layers/Sqlite.ts";
-import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import { OrchestrationActor } from "./actor.ts";
 import * as DelegationStoreLayer from "./DelegationStore.ts";
 import { DelegationStore } from "./DelegationStore.ts";
 import { OrchestrationToolkitHandlersLive } from "./handlers.ts";
@@ -35,15 +35,6 @@ const toolkitFailure = (failure: unknown): OrchestrationToolkitError => {
 
 const parentThreadId = ThreadId.make("thread-handler-parent");
 const orphanThreadId = ThreadId.make("thread-handler-orphan");
-
-const invocationFor = (threadId: ThreadId) => ({
-  environmentId: EnvironmentId.make("environment-handler-test"),
-  threadId,
-  providerSessionId: "provider-session-handler-test",
-  providerInstanceId: ProviderInstanceId.make("opencode"),
-  capabilities: new Set(["preview"] as const),
-  issuedAt: 1,
-});
 
 // Mirrors the real decider: `thread.settle` is refused while the session is
 // live, which is always true while a thread's own agent is calling a tool.
@@ -109,7 +100,7 @@ const callHandoff = (threadId: ThreadId, value: DelegationHandoff) =>
         Stream.unwrap,
         Stream.run(Sink.last()),
         Effect.flatMap(Effect.fromOption),
-        Effect.provideService(McpInvocationContext.McpInvocationContext, invocationFor(threadId)),
+        Effect.provideService(OrchestrationActor, { threadId }),
       );
   });
 
@@ -197,10 +188,7 @@ layer("orchestration handlers", (it) => {
           Stream.unwrap,
           Stream.run(Sink.last()),
           Effect.flatMap(Effect.fromOption),
-          Effect.provideService(
-            McpInvocationContext.McpInvocationContext,
-            invocationFor(parentThreadId),
-          ),
+          Effect.provideService(OrchestrationActor, { threadId: parentThreadId }),
         );
 
       const encoded = result.encodedResult as {
@@ -212,7 +200,6 @@ layer("orchestration handlers", (it) => {
       assert.strictEqual(encoded.settled, false);
       assert.match(String(encoded.deferredReason), /applied once the thread goes idle/);
       assert.deepStrictEqual(settleAttempts, [parentThreadId]);
-
       const pending = yield* store.pendingSettleRequests();
       assert.include(
         pending.map((request) => request.threadId),
@@ -246,7 +233,7 @@ layer("orchestration handlers", (it) => {
           Stream.unwrap,
           Stream.run(Sink.last()),
           Effect.flatMap(Effect.fromOption),
-          Effect.provideService(McpInvocationContext.McpInvocationContext, invocationFor(idle)),
+          Effect.provideService(OrchestrationActor, { threadId: idle }),
         );
 
       assert.strictEqual((result.encodedResult as { readonly settled: boolean }).settled, true);
@@ -270,7 +257,7 @@ layer("orchestration handlers", (it) => {
           Stream.unwrap,
           Stream.run(Sink.last()),
           Effect.flatMap(Effect.fromOption),
-          Effect.provideService(McpInvocationContext.McpInvocationContext, invocationFor(accepted)),
+          Effect.provideService(OrchestrationActor, { threadId: accepted }),
         );
 
       const encoded = result.encodedResult as {

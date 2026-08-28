@@ -187,6 +187,22 @@ export interface DelegationStoreShape {
   readonly worktreePathOfThread: (
     threadId: ThreadId,
   ) => Effect.Effect<string | undefined, OrchestrationToolkitError>;
+  /**
+   * The delegation (if any) whose live child is this thread. The waker reads
+   * this on every child turn-end; an unrelated thread resolves to undefined
+   * and wakes nobody.
+   */
+  readonly findLiveByChildThread: (
+    childThreadId: ThreadId,
+  ) => Effect.Effect<DelegationRow | undefined, OrchestrationToolkitError>;
+  /**
+   * The most recent terminal turn id (completed/error) recorded for a thread,
+   * or null when it has none. Names the idempotency key for one wake per child
+   * terminal turn.
+   */
+  readonly latestTerminalTurnIdOfThread: (
+    threadId: ThreadId,
+  ) => Effect.Effect<string | null, OrchestrationToolkitError>;
 }
 
 export class DelegationStore extends Context.Service<DelegationStore, DelegationStoreShape>()(
@@ -676,6 +692,32 @@ const makeDelegationStore = Effect.gen(function* () {
     Effect.mapError(storageFailed("DelegationStore.worktreePathOfThread")),
   );
 
+  const findLiveByChildThread: DelegationStoreShape["findLiveByChildThread"] = Effect.fn(
+    "DelegationStore.findLiveByChildThread",
+  )(
+    function* (childThreadId) {
+      const rows = yield* sql<DelegationRow>`
+        SELECT ${delegationColumns} FROM orchestration_delegations
+        WHERE child_thread_id = ${childThreadId} AND state IN ('pending', 'running')
+      `;
+      return rows[0];
+    },
+    Effect.mapError(storageFailed("DelegationStore.findLiveByChildThread")),
+  );
+
+  const latestTerminalTurnIdOfThread: DelegationStoreShape["latestTerminalTurnIdOfThread"] =
+    Effect.fn("DelegationStore.latestTerminalTurnIdOfThread")(
+      function* (threadId) {
+        const rows = yield* sql<{ readonly turnId: string | null }>`
+          SELECT turn_id AS "turnId" FROM projection_turns
+          WHERE thread_id = ${threadId} AND state IN ('completed', 'error') AND turn_id IS NOT NULL
+          ORDER BY row_id DESC LIMIT 1
+        `;
+        return rows[0]?.turnId ?? null;
+      },
+      Effect.mapError(storageFailed("DelegationStore.latestTerminalTurnIdOfThread")),
+    );
+
   return DelegationStore.of({
     listLiveWithProgress,
     markFailed,
@@ -698,6 +740,8 @@ const makeDelegationStore = Effect.gen(function* () {
     settledOverrideOfThread,
     projectIdOfThread,
     worktreePathOfThread,
+    findLiveByChildThread,
+    latestTerminalTurnIdOfThread,
   });
 });
 
