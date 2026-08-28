@@ -72,6 +72,23 @@ function commandToAggregateRef(command: OrchestrationCommand): {
         aggregateKind: "project",
         aggregateId: command.projectId,
       };
+    case "agent.spawn":
+    case "agent.handoff":
+    case "agent.message":
+    case "agent.inbox":
+    case "agent.settle-self":
+      return {
+        aggregateKind: "thread",
+        aggregateId: command.actorThreadId,
+      };
+    case "agent.whoami":
+      // Only reachable if a dispatch path skipped the agent command runner;
+      // the decider rejects it. There is no thread to name, so the aggregate
+      // is the environment placeholder the receipt row still requires.
+      return {
+        aggregateKind: "thread",
+        aggregateId: "agent-whoami" as ThreadId,
+      };
     default:
       return {
         aggregateKind: "thread",

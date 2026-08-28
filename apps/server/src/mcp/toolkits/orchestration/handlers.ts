@@ -6,7 +6,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { OrchestrationEngineService } from "../../../orchestration/Services/OrchestrationEngine.ts";
-import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import { OrchestrationActor } from "./actor.ts";
 import { DelegationStore, type DelegationRow } from "./DelegationStore.ts";
 import { type StaleVerdict, classifyDelegation } from "./staleness.ts";
 import { OrchestrationRoles, type ResolvedRole } from "./roles.ts";
@@ -217,12 +217,12 @@ const agent_spawn = Effect.fn("OrchestrationToolkit.agent_spawn")(function* (inp
   readonly workdir?: string | undefined;
   readonly idempotencyKey?: string | undefined;
 }) {
-  const invocation = yield* McpInvocationContext.McpInvocationContext;
+  const actor = yield* OrchestrationActor;
   const store = yield* DelegationStore;
   const roles = yield* OrchestrationRoles;
   const engine = yield* OrchestrationEngineService;
   const crypto = yield* Crypto.Crypto;
-  const parentThreadId = invocation.threadId;
+  const parentThreadId = actor.threadId;
 
   // A thread that is itself a delegated child spawns only if its own role says
   // it may. An operator-started thread has no delegation row and is unrestricted.
@@ -398,10 +398,10 @@ const agent_spawn = Effect.fn("OrchestrationToolkit.agent_spawn")(function* (inp
 const agent_handoff = Effect.fn("OrchestrationToolkit.agent_handoff")(function* (
   handoff: DelegationHandoff,
 ) {
-  const invocation = yield* McpInvocationContext.McpInvocationContext;
+  const actor = yield* OrchestrationActor;
   const store = yield* DelegationStore;
 
-  const delegation = yield* store.findByChildThread(invocation.threadId);
+  const delegation = yield* store.findByChildThread(actor.threadId);
   if (!delegation) {
     return yield* new OrchestrationToolkitError({
       reason: "delegation_not_found",
@@ -443,7 +443,7 @@ const agent_handoff = Effect.fn("OrchestrationToolkit.agent_handoff")(function* 
   // The parent is told, but not interrupted. It reads this when it next looks.
   yield* store.enqueueMessage({
     messageId: `handoff:${delegation.delegationId}`,
-    fromThreadId: invocation.threadId,
+    fromThreadId: actor.threadId,
     fromDelegationId: delegation.delegationId,
     toThreadId: delegation.parentThreadId,
     body: `Delegation ${delegation.delegationId} (${delegation.role}) reported ${state}: ${handoff.summary}`,
@@ -469,7 +469,7 @@ const agent_message = Effect.fn("OrchestrationToolkit.agent_message")(function* 
   readonly body: string;
   readonly idempotencyKey: string;
 }) {
-  const invocation = yield* McpInvocationContext.McpInvocationContext;
+  const actor = yield* OrchestrationActor;
   const store = yield* DelegationStore;
 
   const oversized = briefRejection(input.body, "message");
@@ -485,8 +485,8 @@ const agent_message = Effect.fn("OrchestrationToolkit.agent_message")(function* 
 
   // Authority comes from the delegation relationship, not from knowing an id.
   // A caller may address the child it started, or the parent that started it.
-  const isParent = delegation.parentThreadId === invocation.threadId;
-  const isChild = delegation.childThreadId === invocation.threadId;
+  const isParent = delegation.parentThreadId === actor.threadId;
+  const isChild = delegation.childThreadId === actor.threadId;
   if (!isParent && !isChild) {
     return yield* new OrchestrationToolkitError({
       reason: "message_rejected",
@@ -502,11 +502,11 @@ const agent_message = Effect.fn("OrchestrationToolkit.agent_message")(function* 
     });
   }
 
-  const senderDelegation = yield* store.findByChildThread(invocation.threadId);
-  const messageId = `msg:${invocation.threadId}:${input.idempotencyKey}`;
+  const senderDelegation = yield* store.findByChildThread(actor.threadId);
+  const messageId = `msg:${actor.threadId}:${input.idempotencyKey}`;
   const enqueued = yield* store.enqueueMessage({
     messageId,
-    fromThreadId: invocation.threadId,
+    fromThreadId: actor.threadId,
     fromDelegationId: senderDelegation?.delegationId,
     toThreadId: target,
     body: input.body,
@@ -563,7 +563,7 @@ const applyPendingSettles = Effect.fn("OrchestrationToolkit.applyPendingSettles"
 });
 
 const agent_settle_self = Effect.fn("OrchestrationToolkit.agent_settle_self")(function* () {
-  const invocation = yield* McpInvocationContext.McpInvocationContext;
+  const actor = yield* OrchestrationActor;
   const store = yield* DelegationStore;
 
   // Try now in case this thread is somehow already idle, then fall back to
@@ -575,13 +575,13 @@ const agent_settle_self = Effect.fn("OrchestrationToolkit.agent_settle_self")(fu
   // was taken, not that the thread is settled, so the projection is read back
   // before reporting success. Claiming `settled` while the override stayed unset
   // is exactly the shape of failure this toolkit exists to remove.
-  yield* dispatchSettle(invocation.threadId).pipe(Effect.ignore);
-  const applied = yield* store.settledOverrideOfThread(invocation.threadId);
+  yield* dispatchSettle(actor.threadId).pipe(Effect.ignore);
+  const applied = yield* store.settledOverrideOfThread(actor.threadId);
   if (applied === "settled") {
     return { settled: true, deferredReason: null };
   }
 
-  yield* store.requestSettle(invocation.threadId);
+  yield* store.requestSettle(actor.threadId);
   return {
     settled: false,
     deferredReason:
@@ -592,10 +592,10 @@ const agent_settle_self = Effect.fn("OrchestrationToolkit.agent_settle_self")(fu
 const agent_inbox = Effect.fn("OrchestrationToolkit.agent_inbox")(function* (input: {
   readonly includeDelivered?: boolean | undefined;
 }) {
-  const invocation = yield* McpInvocationContext.McpInvocationContext;
+  const actor = yield* OrchestrationActor;
   const store = yield* DelegationStore;
 
-  const messages = yield* store.readInbox(invocation.threadId, input.includeDelivered ?? false);
+  const messages = yield* store.readInbox(actor.threadId, input.includeDelivered ?? false);
   const undelivered = messages.filter((message) => message.deliveredAt === null);
   yield* store.markDelivered(undelivered.map((message) => message.messageId));
 
@@ -603,7 +603,7 @@ const agent_inbox = Effect.fn("OrchestrationToolkit.agent_inbox")(function* (inp
   // nobody has checked recently".
   const verdicts = yield* sweepStaleDelegations();
   yield* applyPendingSettles();
-  const rows = yield* store.listByParent(invocation.threadId);
+  const rows = yield* store.listByParent(actor.threadId);
   const delegations = yield* Effect.forEach(rows, (row) =>
     toInboxDelegation(row, verdicts.get(row.delegationId)),
   );
@@ -622,12 +622,20 @@ const agent_inbox = Effect.fn("OrchestrationToolkit.agent_inbox")(function* (inp
   };
 });
 
+const agent_whoami = Effect.fn("OrchestrationToolkit.agent_whoami")(function* () {
+  const actor = yield* OrchestrationActor;
+  return { threadId: actor.threadId };
+});
+
 const handlers = {
   agent_spawn,
   agent_handoff,
   agent_message,
   agent_inbox,
   agent_settle_self,
+  agent_whoami,
 } satisfies Parameters<typeof OrchestrationToolkit.toLayer>[0];
 
 export const OrchestrationToolkitHandlersLive = OrchestrationToolkit.toLayer(handlers);
+
+export { agent_spawn, agent_handoff, agent_message, agent_inbox, agent_settle_self, agent_whoami };
