@@ -1,8 +1,10 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import { TestClock } from "effect/testing";
 
 import {
   SERVER_LOCK_FILENAME,
@@ -75,23 +77,40 @@ layer("serverSingleton", (it) => {
         Effect.gen(function* () {
           const held = yield* acquireServerSingleton(stateDir);
           assert.strictEqual(held, lockPath);
+          // The takeover renames the stale file aside and cleans it up, rather
+          // than deleting it in place — the state directory holds our lock and
+          // nothing else.
+          assert.deepStrictEqual(yield* fs.readDirectory(stateDir), ["server.lock"]);
         }),
       );
     }),
   );
 
-  it.effect("reclaims a lock file left half-written by a crash", () =>
+  it.effect("refuses a lock file left half-written by a crash", () =>
     Effect.gen(function* () {
       const stateDir = yield* makeStateDir();
       const fs = yield* FileSystem.FileSystem;
       const lockPath = yield* serverLockPath(stateDir);
       yield* fs.writeFileString(lockPath, '{"version":1,"pid":');
 
-      yield* Effect.scoped(
+      // The claim waits out a torn lock with sleeps; advance the test clock so
+      // those polls resolve instead of parking the fiber forever.
+      const ticker = yield* Effect.forkScoped(Effect.forever(TestClock.adjust("50 millis")));
+      const failure = yield* Effect.scoped(
         Effect.gen(function* () {
-          yield* acquireServerSingleton(stateDir);
+          // A torn file may equally be another server mid-publish, which is
+          // live — so it is never reclaimed, only waited out and then refused.
+          return yield* acquireServerSingleton(stateDir).pipe(Effect.flip);
         }),
       );
+      yield* Fiber.interrupt(ticker);
+      assert.strictEqual(failure._tag, "ServerLockUnavailableError");
+      if (failure._tag === "ServerLockUnavailableError") {
+        assert.include(failure.message, "remove");
+        assert.include(failure.message, lockPath);
+      }
+      // The refusal must not have destroyed the evidence or the lock itself.
+      assert.isTrue(yield* fs.exists(lockPath));
     }),
   );
 

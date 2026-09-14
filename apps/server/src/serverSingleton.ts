@@ -22,8 +22,10 @@
  * So the lock is an atomically created file holding the owner's identity, and
  * liveness is checked with signal 0. The tradeoff is honest: if a server is
  * killed and its pid is later reused by an unrelated process, this refuses to
- * start until the file is removed. That is the safe direction to fail, and the
- * message names the file so recovery is one `rm`.
+ * start until the file is removed. A lock that cannot be read at all is treated
+ * the same way — never auto-reclaimed, because a half-written file may belong
+ * to a server that is starting right now. That is the safe direction to fail,
+ * and the message names the file so recovery is one `rm`.
  */
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -107,19 +109,29 @@ export const processIsAlive = (pid: number): boolean => {
   }
 };
 
-const readHolder = Effect.fn("serverSingleton.readHolder")(function* (lockPath: string) {
+/** The lock file's raw contents, or `undefined` when it does not exist. */
+const readLockFile = Effect.fn("serverSingleton.readLockFile")(function* (lockPath: string) {
   const fs = yield* FileSystem.FileSystem;
-  const raw = yield* fs.readFileString(lockPath).pipe(Effect.orElseSucceed(() => ""));
-  return Option.getOrUndefined(decodeHolder(raw));
+  return yield* fs.readFileString(lockPath).pipe(Effect.option);
+});
+
+const readHolder = Effect.fn("serverSingleton.readHolder")(function* (lockPath: string) {
+  const raw = yield* readLockFile(lockPath);
+  if (Option.isNone(raw)) return undefined;
+  return Option.getOrUndefined(decodeHolder(raw.value));
 });
 
 /**
  * Claims the directory, or explains who holds it.
  *
- * A lock file whose owner is gone — or which is unreadable, which means a
- * half-written file from a crash mid-write — is reclaimed rather than treated as
- * a permanent block. Reclaiming re-races the exclusive create, so two servers
- * starting together still produce exactly one winner.
+ * A lock whose holder decodes but is dead is taken over by renaming the file
+ * aside — atomic, so two reclaimers cannot both remove-and-recreate their way
+ * to two winners — and re-racing the exclusive create. An *unreadable* lock is
+ * a different situation: it is either a crash-torn file or another starting
+ * server whose exclusive create has landed but whose contents are still being
+ * written, and the two cannot be distinguished. The second case is live, so an
+ * unreadable lock is never reclaimed; we poll until the publish settles, and
+ * refuse if it never does.
  */
 const claimLock = Effect.fn("serverSingleton.claimLock")(function* (input: {
   readonly stateDir: string;
@@ -129,15 +141,29 @@ const claimLock = Effect.fn("serverSingleton.claimLock")(function* (input: {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const payload = encodeHolder({ version: 1, pid: process.pid, startedAt: input.startedAt });
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  // Suffixed with our pid: two concurrent reclaimers rename to different trash
+  // names, so neither can clobber the other's take.
+  const trashPath = `${input.lockPath}.reclaimed.${process.pid}`;
+  let unreadablePolls = 0;
+  for (let attempt = 0; attempt < 25; attempt += 1) {
     yield* fs.makeDirectory(path.dirname(input.lockPath), { recursive: true }).pipe(Effect.ignore);
     const created = yield* fs.writeFileString(input.lockPath, payload, { flag: "wx" }).pipe(
       Effect.as(true),
       Effect.orElseSucceed(() => false),
     );
-    if (created) return undefined;
+    if (created) {
+      // Winning the create wins the pathname, not the argument. A reclaimer
+      // that read the previous holder as dead can still rename our file aside
+      // in the instant before this read; if it did, we lost and re-evaluate.
+      const ours = yield* readHolder(input.lockPath);
+      if (ours !== undefined && ours.pid === process.pid) return undefined;
+      continue;
+    }
 
-    const holder = yield* readHolder(input.lockPath);
+    const raw = yield* readLockFile(input.lockPath);
+    if (Option.isNone(raw)) continue; // Removed under us: the pathname is free, race the create again.
+
+    const holder = Option.getOrUndefined(decodeHolder(raw.value));
     if (holder !== undefined && processIsAlive(holder.pid)) {
       return new ServerAlreadyRunningError({
         stateDir: input.stateDir,
@@ -147,14 +173,26 @@ const claimLock = Effect.fn("serverSingleton.claimLock")(function* (input: {
         holderStartedAt: holder.startedAt,
       });
     }
-    // Owner is gone, or the file is unreadable because a crash tore a write in
-    // half. Reclaim and re-race the exclusive create, which still yields one
-    // winner when two servers start together.
-    yield* fs.remove(input.lockPath).pipe(Effect.ignore);
+    if (holder === undefined) {
+      unreadablePolls += 1;
+      if (unreadablePolls > 5) {
+        return new ServerLockUnavailableError({
+          lockPath: input.lockPath,
+          reason:
+            "its contents never became a readable holder, so a concurrent start and a crash-torn write cannot be told apart; if no server is starting or running, remove the file manually and start again",
+        });
+      }
+      yield* Effect.sleep("50 millis");
+      continue;
+    }
+    // Owner is gone. Take the pathname atomically rather than deleting it, so a
+    // concurrent reclaimer's create fails against ours instead of erasing it.
+    yield* fs.rename(input.lockPath, trashPath).pipe(Effect.ignore);
+    yield* fs.remove(trashPath).pipe(Effect.ignore);
   }
   return new ServerLockUnavailableError({
     lockPath: input.lockPath,
-    reason: "the lock was repeatedly reclaimed by another starting server",
+    reason: "the lock kept changing hands while it was being claimed",
   });
 });
 
