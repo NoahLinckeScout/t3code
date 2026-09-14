@@ -11,8 +11,8 @@
  * Same shape as a stream watchdog, and bounded by the same discipline:
  *
  * - No model runs inside it. The wake decision is a ledger/projection check —
- *   is this thread a live delegation child, and has this terminal turn already
- *   been woken over?
+ *   is this thread a delegation child (settled or live), and has this terminal
+ *   turn already been woken over?
  * - One wake per child terminal turn. The wake command id is derived from the
  *   delegation and the terminal turn id, so the engine's command receipts make
  *   a duplicate wake a replay rather than a second turn.
@@ -101,9 +101,13 @@ const make = Effect.gen(function* () {
     }
 
     const childThreadId = event.payload.threadId;
-    const delegation = yield* store.findLiveByChildThread(childThreadId);
+    // A delegation keeps naming its parent after it settles: a child that
+    // hands off (`agent_handoff`) before its turn ends is already completed or
+    // blocked when the terminal session-set arrives, so the lookup must not
+    // filter on state. An unrelated thread — no delegation row at all — still
+    // wakes nobody.
+    const delegation = yield* store.findByChildThread(childThreadId);
     if (!delegation || delegation.parentThreadId === null) {
-      // An unrelated thread going terminal wakes nobody.
       return;
     }
 

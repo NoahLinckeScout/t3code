@@ -260,6 +260,15 @@ describe("agent.* dispatch commands (real engine + sqlite)", () => {
         // The dispatch was accepted and sequenced.
         assert.isAtLeast(result.sequence, 1);
 
+        // The handler payload rides on the dispatch result: an MCP-less
+        // caller learns the delegation and its child thread without a store
+        // read.
+        const spawnPayload = result.result as {
+          delegationId: string;
+          childThreadId: string;
+        };
+        assert.isString(spawnPayload.delegationId);
+
         const sql = yield* SqlClient.SqlClient;
 
         // A delegation row exists for the parent, pointing at a live child.
@@ -280,6 +289,8 @@ describe("agent.* dispatch commands (real engine + sqlite)", () => {
         assert.strictEqual(delegation.role, "research");
         assert.strictEqual(delegation.state, "running");
         assert.isNotNull(delegation.childThreadId);
+        assert.strictEqual(spawnPayload.delegationId, delegation.delegationId);
+        assert.strictEqual(spawnPayload.childThreadId, delegation.childThreadId);
 
         const childRows = yield* sql<DispatchRow>`
           SELECT thread_id AS "threadId", title, model_selection_json AS "modelSelectionJson"
@@ -349,6 +360,54 @@ describe("agent.* dispatch commands (real engine + sqlite)", () => {
       }).pipe(Effect.provide(dispatchSystemLayer)),
   );
 
+  it.effect("replays a retried command id with its recorded handler payload", () =>
+    Effect.gen(function* () {
+      yield* writeRolesFixture();
+      yield* seedParentThread("replay");
+
+      const dispatchService = yield* ClientOrchestrationCommandDispatch;
+      const command = spawnCommand({ objective: "replay-payload" });
+
+      const first = yield* dispatchService.dispatch(command);
+      const replay = yield* dispatchService.dispatch(command);
+
+      // The retry is answered from the receipt: same sequence, and the
+      // payload identifies the delegation the first execution created — no
+      // second child thread is spawned to produce it.
+      assert.strictEqual(replay.sequence, first.sequence);
+      const firstPayload = first.result as { delegationId: string; childThreadId: string };
+      const replayPayload = replay.result as { delegationId: string; childThreadId: string };
+      assert.strictEqual(replayPayload.delegationId, firstPayload.delegationId);
+      assert.strictEqual(replayPayload.childThreadId, firstPayload.childThreadId);
+      const store = yield* DelegationStore;
+      const delegations = yield* store.listByParent(PARENT_THREAD);
+      assert.strictEqual(delegations.length, 1);
+    }).pipe(Effect.provide(dispatchSystemLayer)),
+  );
+
+  it.effect("collapses concurrent duplicate command ids into a single execution", () =>
+    Effect.gen(function* () {
+      yield* writeRolesFixture();
+      yield* seedParentThread("concurrent");
+
+      const dispatchService = yield* ClientOrchestrationCommandDispatch;
+      const command = spawnCommand({ objective: "single-flight" });
+
+      // Both callers run at once; the loser must join the winner's execution
+      // instead of observing an empty receipt table and running the handler
+      // again.
+      const outcomes = yield* Effect.forEach(
+        [1, 2],
+        () => dispatchService.dispatch(command),
+        { concurrency: 2 },
+      );
+      assert.deepStrictEqual(outcomes[0], outcomes[1]);
+      const store = yield* DelegationStore;
+      const delegations = yield* store.listByParent(PARENT_THREAD);
+      assert.strictEqual(delegations.length, 1);
+    }).pipe(Effect.provide(dispatchSystemLayer)),
+  );
+
   it.effect("reads the child delegation back through agent.inbox on the parent", () =>
     Effect.gen(function* () {
       yield* writeRolesFixture();
@@ -364,8 +423,15 @@ describe("agent.* dispatch commands (real engine + sqlite)", () => {
       });
       assert.isAtLeast(inboxResult.sequence, 1);
 
-      // The dispatch result carries only a sequence; the state is read from
-      // the store the handler wrote.
+      // The dispatch result itself carries the inbox payload — delegations
+      // with their child threads — not just a sequence.
+      const inboxPayload = inboxResult.result as {
+        delegations: ReadonlyArray<{ role: string; childThreadId: string | null }>;
+      };
+      assert.strictEqual(inboxPayload.delegations.length, 1);
+      assert.strictEqual(inboxPayload.delegations[0]!.role, "research");
+      assert.isNotNull(inboxPayload.delegations[0]!.childThreadId);
+
       const store = yield* DelegationStore;
       const delegations = yield* store.listByParent(PARENT_THREAD);
       assert.strictEqual(delegations.length, 1);
@@ -386,10 +452,19 @@ describe("agent.* dispatch commands (real engine + sqlite)", () => {
       const runner = yield* AgentCommandRunner;
 
       // Bound: subject thread:<id> → that id back, on the result's `self`.
-      const boundResult = yield* runner.dispatch(whoamiCommand(), {
+      const command = whoamiCommand();
+      const boundResult = yield* runner.dispatch(command, {
         selfIdentity: selfIdentityFromSessionSubject(`thread:${PARENT_THREAD}`),
       });
       assert.strictEqual(boundResult.self, PARENT_THREAD);
+
+      // A retry with the same command id replays the identity: `self` comes
+      // from the session binding again, not just from the first response.
+      const replayResult = yield* runner.dispatch(command, {
+        selfIdentity: selfIdentityFromSessionSubject(`thread:${PARENT_THREAD}`),
+      });
+      assert.strictEqual(replayResult.self, PARENT_THREAD);
+      assert.strictEqual(replayResult.sequence, boundResult.sequence);
 
       // Unbound: a session with a non-thread subject must not be told a thread.
       const failure = yield* runner
