@@ -1734,6 +1734,12 @@ export const DispatchResult = Schema.Struct({
   // Set only by agent.whoami: the thread id the authenticated caller is bound
   // to. Optional so every other command's result keeps its old shape.
   self: Schema.optional(ThreadId),
+  // The command's handler payload (a spawn's delegation and child thread, an
+  // inbox's messages, ...), recorded with the receipt and returned on first
+  // dispatch and on replays alike. Typed `unknown` here on purpose: the
+  // per-command result schemas live in the server's orchestration toolkit and
+  // deliberately stay out of contracts.
+  result: Schema.optional(Schema.Unknown),
 });
 export type DispatchResult = typeof DispatchResult.Type;
 

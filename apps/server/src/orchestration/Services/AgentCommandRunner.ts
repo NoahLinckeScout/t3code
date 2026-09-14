@@ -12,14 +12,18 @@
  * command (`actorThreadId`) instead of an MCP invocation scope.
  *
  * Results are receipted like any other orchestration command: the first
- * dispatch of a commandId runs the handler and records a receipt; a re-dispatch
- * of the same commandId replays it instead of spawning a second child.
+ * dispatch of a commandId runs the handler and records a receipt — handler
+ * payload included — and a re-dispatch of the same commandId replays that
+ * receipt instead of spawning a second child. Concurrent first dispatches of
+ * one commandId are single-flight: the loser joins the winner's execution
+ * rather than racing it.
  */
 import type { AgentOrchestrationCommand, DispatchResult, ThreadId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
@@ -72,6 +76,10 @@ export class AgentCommandRunner extends Context.Service<
 
 const isToolkitError = Schema.is(OrchestrationToolkitError);
 
+// Handler payloads ride on receipts as JSON strings; the codec validates both
+// directions instead of trusting raw JSON calls.
+const StoredResultJson = Schema.fromJsonString(Schema.Unknown);
+
 type HandlerResult =
   | SpawnResult
   | HandoffResult
@@ -79,6 +87,8 @@ type HandlerResult =
   | InboxResult
   | SettleSelfResult
   | WhoamiResult;
+
+type DispatchError = OrchestrationDispatchError | OrchestrationToolkitError | SelfNotBoundError;
 
 const makeAgentCommandRunner = Effect.gen(function* () {
   const engine = yield* OrchestrationEngineService;
@@ -135,13 +145,39 @@ const makeAgentCommandRunner = Effect.gen(function* () {
     }
   };
 
-  const dispatch: AgentCommandRunnerShape["dispatch"] = (command, options) =>
+  const dispatchOnce = (
+    command: AgentOrchestrationCommand,
+    options?: { readonly selfIdentity?: OrchestrationSelfIdentityShape },
+  ): Effect.Effect<DispatchResult, DispatchError> =>
     Effect.gen(function* () {
       const existingReceipt = yield* receipts.getByCommandId({ commandId: command.commandId });
       if (existingReceipt._tag === "Some") {
         const receipt = existingReceipt.value;
         if (receipt.status === "accepted") {
-          return { sequence: receipt.resultSequence };
+          // The receipt carries the handler payload the first execution
+          // produced, so a retried dispatch answers with the same body the
+          // original response had. Rows written before payloads were recorded
+          // replay as sequence-only, which stays a complete answer for every
+          // command whose effect is readable from the store.
+          // An unparseable stored payload degrades to sequence-only rather
+          // than failing a dispatch that was already accepted once.
+          const result =
+            receipt.resultJson != null
+              ? yield* Schema.decodeEffect(StoredResultJson)(receipt.resultJson).pipe(
+                  Effect.catch(() => Effect.succeed(undefined)),
+                )
+              : undefined;
+          // agent.whoami's answer is the caller's own session binding, so its
+          // `self` is recomputed per request rather than trusted from the
+          // receipt — including failing closed for a replay from a caller the
+          // server cannot bind.
+          if (command.type === "agent.whoami") {
+            const self = yield* (options?.selfIdentity ?? unboundSelfIdentity).selfThreadId;
+            return { sequence: receipt.resultSequence, self };
+          }
+          return result !== undefined
+            ? { sequence: receipt.resultSequence, result }
+            : { sequence: receipt.resultSequence };
         }
         return yield* new OrchestrationToolkitError({
           reason: "dispatch_failed",
@@ -184,6 +220,11 @@ const makeAgentCommandRunner = Effect.gen(function* () {
         "threadId" in result ? (result.threadId as ThreadId | undefined) : undefined;
 
       const sequence = yield* engine.latestSequence;
+      // A non-serializable handler result stores no payload; the receipt's
+      // dedup job does not depend on it.
+      const resultJson = yield* Schema.encodeEffect(StoredResultJson)(result).pipe(
+        Effect.catch(() => Effect.succeed(null as string | null)),
+      );
       yield* receipts
         .upsert({
           commandId: command.commandId,
@@ -196,13 +237,40 @@ const makeAgentCommandRunner = Effect.gen(function* () {
           resultSequence: sequence,
           status: "accepted",
           error: null,
+          resultJson,
         })
         .pipe(Effect.catch(() => Effect.void));
 
       if (command.type === "agent.whoami") {
         return { sequence, self: resultThreadId };
       }
-      return { sequence };
+      return { sequence, result };
+    });
+
+  // The engine serializes commands through its single-worker queue; agent.*
+  // commands bypass that queue, so the runner keeps its own per-commandId
+  // single-flight: the first dispatch runs check-execute-record in a forked
+  // fiber and any concurrent duplicate joins that fiber, sharing its outcome
+  // (including its failure) instead of re-running the handler. Together with
+  // the per-state-dir server lock this makes the commandId the deduplication
+  // boundary the dispatch contract documents.
+  const inFlight = new Map<string, Fiber.Fiber<DispatchResult, DispatchError>>();
+
+  const dispatch: AgentCommandRunnerShape["dispatch"] = (command, options) =>
+    Effect.suspend(() => {
+      const running = inFlight.get(command.commandId);
+      if (running !== undefined) {
+        return Fiber.join(running);
+      }
+      return dispatchOnce(command, options).pipe(
+        Effect.forkChild,
+        Effect.flatMap((fiber) => {
+          inFlight.set(command.commandId, fiber);
+          return Fiber.join(fiber).pipe(
+            Effect.ensuring(Effect.sync(() => inFlight.delete(command.commandId))),
+          );
+        }),
+      );
     });
 
   return AgentCommandRunner.of({ dispatch });

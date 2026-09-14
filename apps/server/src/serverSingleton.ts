@@ -218,7 +218,15 @@ export const recordServerLockPort = Effect.fn("serverSingleton.recordPort")(func
   const fs = yield* FileSystem.FileSystem;
   const holder = yield* readHolder(lockPath);
   if (holder === undefined || holder.pid !== process.pid) return;
-  yield* fs.writeFileString(lockPath, encodeHolder({ ...holder, port })).pipe(Effect.ignore);
+  // Rewrite through a temp file + rename: the lock path never holds a
+  // truncated or partial holder, so a concurrent starter reading it sees
+  // either the previous complete holder or this one — never an unparsable
+  // middle that looks stale enough to reclaim.
+  const tempPath = `${lockPath}.port.${process.pid}`;
+  yield* fs.writeFileString(tempPath, encodeHolder({ ...holder, port })).pipe(Effect.ignore);
+  yield* fs.rename(tempPath, lockPath).pipe(
+    Effect.catch(() => fs.remove(tempPath).pipe(Effect.ignore)),
+  );
 });
 
 export const serverLockPath = Effect.fn("serverSingleton.lockPath")(function* (stateDir: string) {

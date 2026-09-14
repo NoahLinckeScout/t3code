@@ -30,6 +30,10 @@ export const OrchestrationCommandReceipt = Schema.Struct({
   resultSequence: NonNegativeInt,
   status: OrchestrationCommandReceiptStatus,
   error: Schema.NullOr(Schema.String),
+  // JSON-encoded handler payload for agent.* commands, so a retried dispatch
+  // can answer with what the first execution produced. Engine commands leave
+  // it null: their replay is fully described by the sequence.
+  resultJson: Schema.optional(Schema.NullOr(Schema.String)),
 });
 export type OrchestrationCommandReceipt = typeof OrchestrationCommandReceipt.Type;
 
