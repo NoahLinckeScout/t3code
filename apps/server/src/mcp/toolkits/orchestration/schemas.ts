@@ -82,7 +82,7 @@ export const AbandonedRecordFromJson = Schema.fromJsonString(AbandonedRecord);
 export const SpawnInput = Schema.Struct({
   role: TrimmedNonEmptyString.annotate({
     description:
-      "A role declared in this environment's orchestration roles config. Roles name capability, not vendor: the config decides which provider instance and model serve the role.",
+      "A named capability from orchestration-roles.json, or a catalog key instanceId/model for any model already configured in settings.json (the same registry t3-orchestrate --model-selection uses). Named roles win on collision.",
   }),
   objective: TrimmedNonEmptyString.annotate({
     description: "What the child owns. Bound it: a child that owns everything owns nothing.",

@@ -1,15 +1,21 @@
 /**
  * Role resolution for delegated work.
  *
- * A spawning agent names a *role* — what the child is for. This file is the only
- * place that turns a role into a provider instance and model. That split is the
- * point: if the tool call named a provider, every prompt in the system would
- * start encoding one vendor's name, and swapping the backend would mean editing
- * prose across every thread. Roles keep provider choice an operator decision.
+ * A spawning agent names a *role* — what the child is for. Named roles in
+ * `orchestration-roles.json` stay the capability abstraction: instructions,
+ * canSpawn, deadlines, and a bound provider+model. That split is the point
+ * for standing lanes — if every prompt named a vendor, swapping the backend
+ * would mean editing prose across every thread.
  *
- * There are no defaults. `providerInstanceId` is a per-install, user-configured
- * value — the same string means different things on two machines — so guessing
- * one would be guessing which vendor gets the work. Absent config fails closed.
+ * Models that already work in t3code (settings.json `providerInstances` plus
+ * each instance's `customModels`) are also reachable as catalog keys
+ * `instanceId/model`, so adding a model in one place makes it spawnable
+ * without a new named role. The wire still has no `modelSelection` field;
+ * the catalog is the same registry `t3-orchestrate --model-selection` uses.
+ *
+ * There are no default named roles. Absent roles config fails closed for
+ * capability names. Catalog keys fail closed when the instance is missing,
+ * disabled, or does not list the model.
  */
 import {
   ProviderInstanceId,
@@ -18,6 +24,7 @@ import {
   RuntimeMode,
 } from "@t3tools/contracts";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
+import { readCustomModelEntries } from "@t3tools/shared/model";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -70,6 +77,102 @@ export const RolesConfig = Schema.Struct({
 export type RolesConfig = typeof RolesConfig.Type;
 
 export const DEFAULT_MAX_DEPTH = 2;
+
+/**
+ * Split `instanceId/model` on the first `/` so model slugs that themselves
+ * contain slashes (`opencode/self-hosted-glm53/glm-5.3-flash`) stay intact.
+ * Named roles do not use `/`; a file role always wins on collision.
+ */
+export const parseCatalogRoleKey = (
+  roleName: string,
+): { readonly instanceId: string; readonly model: string } | undefined => {
+  const separator = roleName.indexOf("/");
+  if (separator <= 0 || separator === roleName.length - 1) {
+    return undefined;
+  }
+  return {
+    instanceId: roleName.slice(0, separator),
+    model: roleName.slice(separator + 1),
+  };
+};
+
+interface CatalogModel {
+  readonly slug: string;
+  readonly options: ProviderOptionSelections | undefined;
+}
+
+interface CatalogInstance {
+  readonly instanceId: string;
+  readonly enabled: boolean;
+  readonly models: ReadonlyArray<CatalogModel>;
+}
+
+const optionsFromCustomModel = (
+  capabilities: ReturnType<typeof readCustomModelEntries>[number]["capabilities"],
+): ProviderOptionSelections | undefined => {
+  if (capabilities === null) return undefined;
+  const selections: Array<{ id: string; value: string | boolean }> = [];
+  for (const descriptor of capabilities.optionDescriptors ?? []) {
+    if (descriptor.currentValue !== undefined) {
+      selections.push({ id: descriptor.id, value: descriptor.currentValue });
+      continue;
+    }
+    if (descriptor.type === "select") {
+      const fallback = descriptor.options.find((option) => option.isDefault)?.id;
+      if (fallback !== undefined) {
+        selections.push({ id: descriptor.id, value: fallback });
+      }
+    }
+  }
+  return selections.length > 0 ? selections : undefined;
+};
+
+const readEnvelopeEnabled = (value: unknown): boolean | undefined => {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const enabled = (value as { readonly enabled?: unknown }).enabled;
+  return typeof enabled === "boolean" ? enabled : undefined;
+};
+
+export const catalogInstancesFromSettings = (raw: unknown): ReadonlyArray<CatalogInstance> => {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return [];
+  }
+  const instances = (raw as { readonly providerInstances?: unknown }).providerInstances;
+  if (instances === null || typeof instances !== "object" || Array.isArray(instances)) {
+    return [];
+  }
+  const catalog: CatalogInstance[] = [];
+  for (const [instanceId, envelope] of Object.entries(instances)) {
+    if (envelope === null || typeof envelope !== "object" || Array.isArray(envelope)) {
+      continue;
+    }
+    const config = (envelope as { readonly config?: unknown }).config;
+    const configEnabled = readEnvelopeEnabled(config);
+    const envelopeEnabled = readEnvelopeEnabled(envelope);
+    const enabled = envelopeEnabled !== false && configEnabled !== false;
+    const customModels =
+      config !== null && typeof config === "object" && !Array.isArray(config)
+        ? (config as { readonly customModels?: unknown }).customModels
+        : undefined;
+    catalog.push({
+      instanceId,
+      enabled,
+      models: readCustomModelEntries(customModels).map((entry) => ({
+        slug: entry.slug,
+        options: optionsFromCustomModel(entry.capabilities),
+      })),
+    });
+  }
+  return catalog;
+};
+
+const catalogKeyList = (catalog: ReadonlyArray<CatalogInstance>): ReadonlyArray<string> =>
+  catalog
+    .filter((instance) => instance.enabled)
+    .flatMap((instance) => instance.models.map((model) => `${instance.instanceId}/${model.slug}`))
+    .sort();
 
 export interface ResolvedRole {
   readonly name: string;
@@ -130,16 +233,75 @@ const makeOrchestrationRoles = Effect.gen(function* () {
     );
   });
 
+  const loadCatalog = Effect.fn("OrchestrationRoles.loadCatalog")(function* () {
+    const raw = yield* fs.readFileString(config.settingsPath).pipe(Effect.orElseSucceed(() => ""));
+    if (raw.trim() === "") {
+      return [];
+    }
+    try {
+      return catalogInstancesFromSettings(JSON.parse(raw) as unknown);
+    } catch {
+      return [];
+    }
+  });
+
+  const resolveFromCatalog = Effect.fn("OrchestrationRoles.resolveFromCatalog")(function* (
+    roleName: string,
+    namedRoles: ReadonlyArray<string>,
+  ) {
+    const catalog = yield* loadCatalog();
+    const reachable = catalogKeyList(catalog);
+    const named = namedRoles.length > 0 ? namedRoles.join(", ") : "(none)";
+    const catalogHint =
+      reachable.length > 0
+        ? ` Catalog models (instanceId/model): ${reachable.join(", ")}.`
+        : " No catalog models are configured in settings.json providerInstances.*.config.customModels.";
+    const key = parseCatalogRoleKey(roleName);
+    if (key === undefined) {
+      return yield* new OrchestrationToolkitError({
+        reason: "role_not_found",
+        detail: `Role ${roleName} is not configured. Configured roles: ${named}.${catalogHint}`,
+      });
+    }
+    const instance = catalog.find((entry) => entry.instanceId === key.instanceId);
+    if (instance === undefined) {
+      return yield* new OrchestrationToolkitError({
+        reason: "role_not_found",
+        detail: `Role ${roleName} is not a named role or a configured catalog model. Configured roles: ${named}.${catalogHint}`,
+      });
+    }
+    if (!instance.enabled) {
+      return yield* new OrchestrationToolkitError({
+        reason: "role_disabled",
+        detail: `Provider instance ${key.instanceId} is disabled in ${config.settingsPath}.`,
+      });
+    }
+    const model = instance.models.find((entry) => entry.slug === key.model);
+    if (model === undefined) {
+      return yield* new OrchestrationToolkitError({
+        reason: "role_not_found",
+        detail: `Model ${key.model} is not in the ${key.instanceId} catalog. Configured roles: ${named}.${catalogHint}`,
+      });
+    }
+    return {
+      name: roleName,
+      providerInstanceId: ProviderInstanceId.make(key.instanceId),
+      model: model.slug,
+      options: model.options,
+      deadlineMinutes: undefined,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      canSpawn: false,
+      instructions: undefined,
+    } satisfies ResolvedRole;
+  });
+
   const resolve: OrchestrationRolesShape["resolve"] = Effect.fn("OrchestrationRoles.resolve")(
     function* (roleName) {
       const loaded = yield* load();
       const definition = loaded.roles[roleName];
       if (!definition) {
-        const known = Object.keys(loaded.roles).sort();
-        return yield* new OrchestrationToolkitError({
-          reason: "role_not_found",
-          detail: `Role ${roleName} is not configured. Configured roles: ${known.length > 0 ? known.join(", ") : "(none)"}.`,
-        });
+        return yield* resolveFromCatalog(roleName, Object.keys(loaded.roles).sort());
       }
       if (definition.enabled === false) {
         return yield* new OrchestrationToolkitError({
