@@ -957,11 +957,13 @@ function workEntryIcon(entry: DerivedWorkLogEntry): ThreadFeedActivity["icon"] {
   if (entry.itemType === "web_search") return "globe";
   if (entry.itemType === "image_view") return "eye";
   if (entry.itemType === "mcp_tool_call") return "wrench";
-  if (entry.tone === "error") return "alert";
+  if (entry.tone === "error" || entry.toolLifecycleStatus === "failed") return "alert";
   // The ACP Task-tool reclassification now files delegated subagent launches
   // here; they are agent work, not another anonymous tool row. Matches the
-  // web timeline, which reads the same type as `agent-tool`. The error tone
-  // wins above so a failed task still loses its icon to the alert chrome.
+  // web timeline, which reads the same type as `agent-tool`. Failure chrome
+  // wins above so a failed task still loses its icon to the alert — including
+  // the ACP path, where ingestion keeps `tone: "tool"` and only `status` is
+  // `"failed"`.
   if (entry.itemType === "collab_agent_tool_call" || entry.taskId) return "agent";
   if (entry.itemType === "dynamic_tool_call") return "hammer";
   if (entry.tone === "thinking") return "agent";

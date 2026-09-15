@@ -3378,6 +3378,50 @@ describe("quiet timeline: nested agents", () => {
     expect(group.activities[0]?.icon).toBe("alert");
   });
 
+  it("keeps the failure chrome on a failed ACP Task that arrives with tool tone", () => {
+    // ProviderRuntimeIngestion always stamps tool.completed as tone "tool"
+    // and puts the failure on payload.status. After the ACP reclassification
+    // that row is collab_agent_tool_call, so the agent branch would hide the
+    // only mobile failure signal unless icon selection also reads status.
+    const turnId = TurnId.make("turn-acp-task-failed");
+    const thread = makeThread({
+      id: ThreadId.make("thread-acp-task-failed"),
+      projectId: ProjectId.make("project-1"),
+      title: "Failed ACP Task",
+      latestTurn: {
+        turnId,
+        state: "completed",
+        requestedAt: "2026-04-01T00:00:00.000Z",
+        startedAt: "2026-04-01T00:00:01.000Z",
+        completedAt: "2026-04-01T00:00:03.000Z",
+        assistantMessageId: null,
+      },
+      activities: [
+        makeActivity({
+          id: EventId.make("acp-task-failed"),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "Task: Subagent task",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          turnId,
+          payload: {
+            title: "Task: Subagent task",
+            itemType: "collab_agent_tool_call",
+            status: "failed",
+          },
+        }),
+      ],
+    });
+
+    const group = buildThreadFeed(thread)[0];
+    expect(group).toMatchObject({ type: "activity-group" });
+    if (!group || group.type !== "activity-group") {
+      return;
+    }
+
+    expect(group.activities[0]?.icon).toBe("alert");
+  });
+
   it("keeps a nested agent's terminal row but hides its background work", () => {
     const thread = makeThread({
       id: ThreadId.make("thread-nested"),
