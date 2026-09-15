@@ -1054,6 +1054,20 @@ export function makeCursorAdapter(
             // thing on the stream, is the only signal that the turn produced
             // nothing. Recording that as `completed` is how five dead threads
             // looked idle instead of crashed.
+            //
+            // `session/prompt` can resolve while the notification fiber is still
+            // behind the queue: the final ContentDelta may be queued but not yet
+            // folded into `ctx.trailingText`. The barrier is acknowledged only
+            // after every event queued ahead of it has been applied, so draining
+            // first is what makes the classification below read the completed
+            // buffer instead of racing it. stopSession interrupts that fiber,
+            // which would leave the barrier unacknowledged forever, so a dying
+            // consumer loses the race instead of hanging the turn.
+            if (ctx.notificationFiber !== undefined) {
+              yield* Effect.raceFirst(ctx.acp.drainEvents, Fiber.await(ctx.notificationFiber));
+            } else {
+              yield* ctx.acp.drainEvents;
+            }
             const failure =
               result.stopReason === "cancelled"
                 ? undefined
