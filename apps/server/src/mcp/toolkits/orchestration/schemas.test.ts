@@ -1,11 +1,36 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as Schema from "effect/Schema";
 
 import {
   type DelegationHandoff,
   MAX_BRIEF_BYTES,
   briefRejection,
   handoffRejection,
+  SpawnInput,
 } from "./schemas.ts";
+
+const decodeSpawnInput = Schema.decodeUnknownSync(SpawnInput);
+
+describe("SpawnInput workdir", () => {
+  const base = { role: "implementer", objective: "Ship it", judgment: "Scope of the fix" };
+
+  it("accepts an absolute posix path", () => {
+    assert.strictEqual(decodeSpawnInput({ ...base, workdir: "/bulk/repo" }).workdir, "/bulk/repo");
+  });
+
+  it("accepts an absolute windows path", () => {
+    assert.strictEqual(
+      decodeSpawnInput({ ...base, workdir: "C:\\repos\\t3code" }).workdir,
+      "C:\\repos\\t3code",
+    );
+  });
+
+  it("rejects a relative path", () => {
+    // The stored value becomes the child's cwd verbatim, so a relative path
+    // would resolve against whatever the provider process happens to start in.
+    assert.throws(() => decodeSpawnInput({ ...base, workdir: "packages/contracts" }));
+  });
+});
 
 const handoff = (overrides: Partial<DelegationHandoff> = {}): DelegationHandoff => ({
   status: "completed",

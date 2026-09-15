@@ -88,6 +88,13 @@ export interface PendingSettleRow {
 export interface InsertPendingInput {
   readonly delegationId: DelegationId;
   readonly parentThreadId: ThreadId;
+  /**
+   * The child the spawn intends to create, named at insert time. A pending row
+   * that carries its child locator is resumable after a crash before dispatch;
+   * one carrying NULL is an orphan the idempotency index only knows how to
+   * refuse.
+   */
+  readonly childThreadId: ThreadId;
   readonly role: string;
   readonly providerInstanceId: string;
   readonly model: string;
@@ -469,7 +476,7 @@ const makeDelegationStore = Effect.gen(function* () {
         spawn_command_id, spawn_sequence, handoff_json, deadline_at, alerted_at,
         created_at, updated_at
       ) VALUES (
-        ${input.delegationId}, ${input.parentThreadId}, NULL, ${input.role},
+        ${input.delegationId}, ${input.parentThreadId}, ${input.childThreadId}, ${input.role},
         ${input.providerInstanceId}, ${input.model}, 'pending', ${input.objective},
         ${input.judgment}, ${input.resourceLease ?? null}, ${input.idempotencyKey ?? null},
         ${input.spawnCommandId}, NULL, NULL, ${input.deadlineAt ?? null}, NULL, ${now}, ${now}

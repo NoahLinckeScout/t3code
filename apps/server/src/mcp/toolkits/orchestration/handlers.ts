@@ -2,6 +2,7 @@ import { CommandId, EventId, MessageId, ProjectId, ThreadId } from "@t3tools/con
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { OrchestrationEngineService } from "../../../orchestration/Services/OrchestrationEngine.ts";
@@ -243,22 +244,34 @@ const agent_spawn = Effect.fn("OrchestrationToolkit.agent_spawn")(function* (inp
     });
   }
 
+  // Set by the idempotency check below when the spawn crashed after recording
+  // its pending row: the row already names the delegation and child to resume.
+  let resumed: DelegationRow | undefined;
+
   if (input.idempotencyKey !== undefined) {
     const existing = yield* store.findByIdempotencyKey(parentThreadId, input.idempotencyKey);
     if (existing?.childThreadId) {
-      return {
-        delegationId: existing.delegationId,
-        state: existing.state,
-        role: existing.role,
-        providerInstanceId: existing.providerInstanceId,
-        model: existing.model,
-        childThreadId: existing.childThreadId,
-        replayed: true,
-      };
+      if (existing.state !== "pending") {
+        return {
+          delegationId: existing.delegationId,
+          state: existing.state,
+          role: existing.role,
+          providerInstanceId: existing.providerInstanceId,
+          model: existing.model,
+          childThreadId: existing.childThreadId,
+          replayed: true,
+        };
+      }
+      // Durable before dispatch: a crash between the pending row and the
+      // child's first turn left a row that already names its delegation and
+      // child. Resume those exact commands below instead of minting a second
+      // delegation that the (parent_thread_id, idempotency_key) unique index
+      // would refuse anyway.
+      resumed = existing;
     }
   }
 
-  const role = yield* roles.resolve(input.role);
+  const role = yield* roles.resolve(resumed?.role ?? input.role);
 
   // Before contending for a lease, retire anything that has plainly stopped.
   // A child that died holding a lease should not block its own replacement.
@@ -285,30 +298,33 @@ const agent_spawn = Effect.fn("OrchestrationToolkit.agent_spawn")(function* (inp
 
   const delegationUuid = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
   const childUuid = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
-  const delegationId = DelegationIdSchema.make(`dlg_${delegationUuid}`);
-  const childThreadId = ThreadId.make(childUuid);
-  const spawnCommandId = `delegation:${delegationId}:thread-create`;
+  const delegationId = resumed?.delegationId ?? DelegationIdSchema.make(`dlg_${delegationUuid}`);
+  const childThreadId = resumed?.childThreadId ?? ThreadId.make(childUuid);
+  const spawnCommandId = resumed?.spawnCommandId ?? `delegation:${delegationId}:thread-create`;
 
   // Durable before dispatch. A crash between these two leaves a `pending` row
   // whose command id can be replayed, not an untracked child.
-  yield* store.insertPending({
-    delegationId,
-    parentThreadId,
-    role: role.name,
-    providerInstanceId: role.providerInstanceId,
-    model: role.model,
-    objective: input.objective,
-    judgment: input.judgment,
-    resourceLease: input.resourceLease,
-    idempotencyKey: input.idempotencyKey,
-    spawnCommandId,
-    deadlineAt:
-      role.deadlineMinutes === undefined
-        ? undefined
-        : DateTime.formatIso(
-            DateTime.addDuration(yield* DateTime.now, `${role.deadlineMinutes} minutes`),
-          ),
-  });
+  if (resumed === undefined) {
+    yield* store.insertPending({
+      delegationId,
+      parentThreadId,
+      childThreadId,
+      role: role.name,
+      providerInstanceId: role.providerInstanceId,
+      model: role.model,
+      objective: input.objective,
+      judgment: input.judgment,
+      resourceLease: input.resourceLease,
+      idempotencyKey: input.idempotencyKey,
+      spawnCommandId,
+      deadlineAt:
+        role.deadlineMinutes === undefined
+          ? undefined
+          : DateTime.formatIso(
+              DateTime.addDuration(yield* DateTime.now, `${role.deadlineMinutes} minutes`),
+            ),
+    });
+  }
 
   const modelSelection = {
     instanceId: role.providerInstanceId,
@@ -394,6 +410,20 @@ const agent_handoff = Effect.fn("OrchestrationToolkit.agent_handoff")(function* 
     });
   }
   if (delegation.state !== "running") {
+    // The tool is registered Idempotent: a retry after a lost response replays
+    // the recorded terminal handoff when the arguments encode to the same
+    // payload, and anything else still refuses a second handoff.
+    const replayJson =
+      delegation.handoffJson !== null
+        ? yield* encodeHandoff(handoff).pipe(Effect.option)
+        : Option.none();
+    if (Option.isSome(replayJson) && replayJson.value === delegation.handoffJson) {
+      return {
+        delegationId: delegation.delegationId,
+        state: delegation.state,
+        parentThreadId: delegation.parentThreadId,
+      };
+    }
     return yield* new OrchestrationToolkitError({
       reason: "delegation_not_live",
       detail: `Delegation ${delegation.delegationId} is ${delegation.state}; a terminal handoff was already recorded.`,

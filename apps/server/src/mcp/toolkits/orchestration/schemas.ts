@@ -119,8 +119,12 @@ export const SpawnInput = Schema.Struct({
     }),
   ),
   workdir: Schema.optional(
-    TrimmedNonEmptyString.annotate({
-      description: "Absolute path the child starts in. Defaults to the parent thread's worktree.",
+    // Enforced here rather than resolved against the parent's worktree: a
+    // relative path means different things to different providers, and the
+    // stored value is used as the child's cwd verbatim.
+    TrimmedNonEmptyString.check(Schema.isPattern(/^(?:\/|[A-Za-z]:[\\/])/)).annotate({
+      description:
+        "Absolute path the child starts in. Defaults to the parent thread's worktree. A relative path is rejected.",
     }),
   ),
   idempotencyKey: Schema.optional(

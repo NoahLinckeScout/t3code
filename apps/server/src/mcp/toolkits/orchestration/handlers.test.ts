@@ -21,6 +21,7 @@ import {
   DelegationId,
   HandoffResult,
   OrchestrationToolkitError,
+  SpawnResult,
 } from "./schemas.ts";
 import { OrchestrationToolkit } from "./tools.ts";
 
@@ -70,6 +71,18 @@ const rolesMock = Layer.mock(OrchestrationRoles)({
   configPath: "/tmp/orchestration-roles.json",
   maxDepth: Effect.succeed(2),
   canSpawnFrom: () => Effect.succeed(true),
+  resolve: () =>
+    Effect.succeed({
+      name: "implementer",
+      providerInstanceId: ProviderInstanceId.make("opencode"),
+      model: "self-hosted-glm",
+      options: undefined,
+      deadlineMinutes: undefined,
+      runtimeMode: "full-access" as const,
+      interactionMode: "default" as const,
+      canSpawn: true,
+      instructions: undefined,
+    }),
 });
 
 const handoff = (overrides: Partial<DelegationHandoff> = {}): DelegationHandoff => ({
@@ -113,6 +126,46 @@ const callHandoff = (threadId: ThreadId, value: DelegationHandoff) =>
       );
   });
 
+const callSpawn = (
+  threadId: ThreadId,
+  value: {
+    readonly role: string;
+    readonly objective: string;
+    readonly judgment: string;
+    readonly workdir?: string;
+    readonly idempotencyKey?: string;
+  },
+) =>
+  Effect.gen(function* () {
+    const built = yield* OrchestrationToolkit;
+    return yield* built
+      .handle("agent_spawn", value)
+      .pipe(
+        Stream.unwrap,
+        Stream.run(Sink.last()),
+        Effect.flatMap(Effect.fromOption),
+        Effect.provideService(McpInvocationContext.McpInvocationContext, invocationFor(threadId)),
+      );
+  });
+
+const decodeSpawnResult = Schema.decodeUnknownSync(SpawnResult);
+
+/** The parent needs a projection row so the child can be created in its project. */
+const ensureParentProjection = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`
+    INSERT INTO projection_threads (
+      thread_id, project_id, title, created_at, updated_at,
+      runtime_mode, interaction_mode, pending_approval_count,
+      pending_user_input_count, has_actionable_proposed_plan, settled_override
+    ) VALUES (
+      ${parentThreadId}, 'project-spawn', 'Parent', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z',
+      'full-access', 'default', 0, 0, 0, NULL
+    )
+    ON CONFLICT (thread_id) DO NOTHING
+  `;
+});
+
 const startDelegation = (scope: string, childThreadId: ThreadId) =>
   Effect.gen(function* () {
     const store = yield* DelegationStore;
@@ -120,6 +173,7 @@ const startDelegation = (scope: string, childThreadId: ThreadId) =>
     yield* store.insertPending({
       delegationId,
       parentThreadId,
+      childThreadId,
       role: "implementer",
       providerInstanceId: "opencode",
       model: "self-hosted-glm",
@@ -181,6 +235,96 @@ layer("orchestration handlers", (it) => {
       yield* callHandoff(child, handoff());
       const failure = yield* callHandoff(child, handoff({ status: "blocked" })).pipe(Effect.flip);
       assert.strictEqual(toolkitFailure(failure).reason, "delegation_not_live");
+    }),
+  );
+
+  it.effect("replays a terminal handoff when the retry matches the recorded arguments", () =>
+    Effect.gen(function* () {
+      const child = ThreadId.make("thread-handler-replay");
+      yield* startDelegation("replay", child);
+
+      const first = decodeHandoffResult((yield* callHandoff(child, handoff())).encodedResult);
+      // The tool is Idempotent: a retry after a lost response returns the
+      // recorded outcome rather than refusing a handoff that already happened.
+      const retry = decodeHandoffResult((yield* callHandoff(child, handoff())).encodedResult);
+      assert.deepStrictEqual(retry, first);
+
+      // A different report is still a second handoff, not a replay.
+      const failure = yield* callHandoff(child, handoff({ summary: "Different work" })).pipe(
+        Effect.flip,
+      );
+      assert.strictEqual(toolkitFailure(failure).reason, "delegation_not_live");
+    }),
+  );
+
+  it.effect("records the child thread in the pending row before dispatching the spawn", () =>
+    Effect.gen(function* () {
+      const store = yield* DelegationStore;
+      yield* ensureParentProjection;
+
+      const result = decodeSpawnResult(
+        (
+          yield* callSpawn(parentThreadId, {
+            role: "implementer",
+            objective: "Rebuild the projection",
+            judgment: "Whether a rebuild or a targeted patch is correct",
+            idempotencyKey: "spawn-once",
+          })
+        ).encodedResult,
+      );
+      assert.strictEqual(result.state, "running");
+      assert.strictEqual(result.replayed, false);
+
+      // The first spawn ran to completion here; the row it left names the child.
+      const row = yield* store.findById(result.delegationId);
+      assert.strictEqual(row?.childThreadId, result.childThreadId);
+      assert.strictEqual(row?.idempotencyKey, "spawn-once");
+    }),
+  );
+
+  it.effect("resumes a spawn whose pending row survived a crash before dispatch", () =>
+    Effect.gen(function* () {
+      const store = yield* DelegationStore;
+      const delegationId = DelegationId.make("dlg-resume");
+      const childThreadId = ThreadId.make("thread-resume-child");
+      yield* ensureParentProjection;
+      // The row a crash between the durable write and dispatch leaves behind:
+      // it already names the delegation and child the spawn committed to.
+      yield* store.insertPending({
+        delegationId,
+        parentThreadId,
+        childThreadId,
+        role: "implementer",
+        providerInstanceId: "opencode",
+        model: "self-hosted-glm",
+        objective: "Resume me",
+        judgment: "Whether the resume reuses the recorded child",
+        resourceLease: undefined,
+        idempotencyKey: "resume-key",
+        spawnCommandId: `delegation:${delegationId}:thread-create`,
+        deadlineAt: undefined,
+      });
+
+      const result = decodeSpawnResult(
+        (
+          yield* callSpawn(parentThreadId, {
+            role: "implementer",
+            objective: "Resume me",
+            judgment: "Whether the resume reuses the recorded child",
+            idempotencyKey: "resume-key",
+          })
+        ).encodedResult,
+      );
+
+      // The resume reuses the recorded delegation and child instead of minting
+      // a second delegation the idempotency index would refuse anyway.
+      assert.strictEqual(result.delegationId, delegationId);
+      assert.strictEqual(result.childThreadId, childThreadId);
+      assert.strictEqual(result.state, "running");
+      assert.strictEqual(result.replayed, false);
+      const row = yield* store.findById(delegationId);
+      assert.strictEqual(row?.state, "running");
+      assert.strictEqual(row?.childThreadId, childThreadId);
     }),
   );
 

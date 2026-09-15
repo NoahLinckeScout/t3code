@@ -27,6 +27,7 @@ const pending = (
   overrides: Partial<DelegationStoreLayer.InsertPendingInput> &
     Pick<DelegationStoreLayer.InsertPendingInput, "delegationId" | "parentThreadId">,
 ): DelegationStoreLayer.InsertPendingInput => ({
+  childThreadId: ThreadId.make(`thread-${overrides.delegationId}-child`),
   role: "implementer",
   providerInstanceId: "opencode",
   model: "self-hosted-glm",
@@ -48,7 +49,8 @@ layer("DelegationStore", (it) => {
       yield* store.insertPending(pending({ delegationId: id.first, parentThreadId: id.parent }));
       const created = yield* store.findById(id.first);
       assert.strictEqual(created?.state, "pending");
-      assert.strictEqual(created?.childThreadId, null);
+      // Named at insert time, so a crash before dispatch leaves a resumable row.
+      assert.strictEqual(created?.childThreadId, pending({ delegationId: id.first, parentThreadId: id.parent }).childThreadId);
 
       yield* store.markRunning(id.first, id.child, 42);
       const running = yield* store.findByChildThread(id.child);
