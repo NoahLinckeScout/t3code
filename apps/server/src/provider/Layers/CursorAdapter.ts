@@ -42,12 +42,8 @@ import type * as EffectAcpSchema from "effect-acp/schema";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
-import {
-  appendTrailingText,
-  providerTransportFailure,
-  transportFailureMessage,
-} from "../transportFailure.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
@@ -71,6 +67,7 @@ import {
 } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
 import { applyCursorAcpModelSelection, makeCursorAcpRuntime } from "../acp/CursorAcpSupport.ts";
+import { CursorTransportFailure } from "../acp/CursorTransportFailure.ts";
 import {
   CursorAskQuestionRequest,
   CursorCreatePlanRequest,
@@ -82,6 +79,11 @@ import {
 import { type CursorAdapterShape } from "../Services/CursorAdapter.ts";
 import { resolveCursorAcpBaseModelId } from "./CursorProvider.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import {
+  discoverCursorSkills,
+  hasCursorSkillMention,
+  rewriteCursorSkillMentions,
+} from "../Drivers/CursorSkills.ts";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 
 const PROVIDER = ProviderDriverKind.make("cursor");
@@ -138,14 +140,12 @@ interface CursorSessionContext {
   readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
   lastPlanFingerprint: string | undefined;
   activeTurnId: TurnId | undefined;
-  /** Bounded trailing window of the current turn's assistant text. A provider
-   * CLI can end a killed turn with `stopReason: "end_turn"`, so the last line it
-   * emitted is the only evidence that the turn failed. */
-  trailingText: string;
+  cursorSkillNames: ReadonlySet<string> | undefined;
   /** Number of sendTurn prompts currently in flight or being prepared.
    * >0 means a turn is actively running, so a new sendTurn is a steer that
    * continues it, and only the last remaining prompt settles the turn. */
   promptsInFlight: number;
+  assistantReply: CursorTransportFailure;
   stopped: boolean;
 }
 
@@ -543,9 +543,17 @@ export function makeCursorAdapter(
           const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
           const acp = yield* makeCursorAcpRuntime({
             cursorSettings: effectiveCursorSettings,
-            ...(options?.environment ? { environment: options.environment } : {}),
+            ...(options?.environment || mcpSession?.agentDeviceEnvironment
+              ? {
+                  environment: McpProviderSession.withAgentDeviceEnvironment(
+                    options?.environment ?? process.env,
+                    mcpSession,
+                  ),
+                }
+              : {}),
             childProcessSpawner,
             cwd,
+            runtimeMode: input.runtimeMode,
             ...(resumeSessionId ? { resumeSessionId } : {}),
             clientInfo: { name: "t3-code", version: "0.0.0" },
             ...(mcpSession
@@ -787,8 +795,9 @@ export function makeCursorAdapter(
             turns: [],
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
-            trailingText: "",
+            cursorSkillNames: undefined,
             promptsInFlight: 0,
+            assistantReply: new CursorTransportFailure(),
             stopped: false,
           };
 
@@ -802,6 +811,7 @@ export function makeCursorAdapter(
                   case "ModeChanged":
                     return;
                   case "AssistantItemStarted":
+                    ctx.assistantReply = new CursorTransportFailure();
                     yield* offerRuntimeEvent(
                       makeAcpAssistantItemEvent({
                         stamp: yield* makeEventStamp(),
@@ -859,7 +869,7 @@ export function makeCursorAdapter(
                     );
                     return;
                   case "ContentDelta":
-                    ctx.trailingText = appendTrailingText(ctx.trailingText, event.text);
+                    ctx.assistantReply.push(event.text);
                     yield* logNative(
                       ctx.threadId,
                       "session/update",
@@ -959,6 +969,7 @@ export function makeCursorAdapter(
           ctx.activeTurnId = turnId;
           if (steeringTurnId === undefined) {
             ctx.lastPlanFingerprint = undefined;
+            ctx.assistantReply = new CursorTransportFailure();
           }
           ctx.session = {
             ...ctx.session,
@@ -978,11 +989,36 @@ export function makeCursorAdapter(
           }
 
           const promptParts: Array<EffectAcpSchema.ContentBlock> = [];
-          if (input.input?.trim()) {
-            promptParts.push({ type: "text", text: input.input.trim() });
+          const rawPrompt = input.input?.trim() ?? "";
+          if (rawPrompt) {
+            let cursorSkillNames = ctx.cursorSkillNames;
+            if (hasCursorSkillMention(rawPrompt) && cursorSkillNames === undefined) {
+              const skills = yield* discoverCursorSkills(
+                ctx.session.cwd,
+                options?.environment,
+              ).pipe(
+                Effect.provideService(FileSystem.FileSystem, fileSystem),
+                Effect.provideService(Path.Path, path),
+              );
+              cursorSkillNames = new Set(
+                skills
+                  .filter((skill) => skill.enabled && skill.userInvocable !== false)
+                  .map((skill) => skill.name),
+              );
+              ctx.cursorSkillNames = cursorSkillNames;
+            }
+            const prompt = cursorSkillNames
+              ? rewriteCursorSkillMentions(rawPrompt, cursorSkillNames)
+              : rawPrompt;
+            promptParts.push({ type: "text", text: prompt });
           }
           if (input.attachments && input.attachments.length > 0) {
             for (const attachment of input.attachments) {
+              // Cursor ingests images only. Generic files reach the agent
+              // through the path line ProviderService puts in the prompt.
+              if (attachment.type !== "image") {
+                continue;
+              }
               const attachmentPath = resolveAttachmentPath({
                 attachmentsDir: serverConfig.attachmentsDir,
                 attachment,
@@ -1021,15 +1057,33 @@ export function makeCursorAdapter(
             });
           }
 
+          // ACP has no system-message field; keep runtime context separate from the user's text.
           const result = yield* ctx.acp
             .prompt({
-              prompt: promptParts,
+              prompt: [
+                ...promptParts,
+                {
+                  type: "text",
+                  text: buildRuntimeInstructions({ harness: "Cursor", model: resolvedModel }),
+                },
+              ],
             })
             .pipe(
               Effect.mapError((error) =>
                 mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
               ),
             );
+
+          yield* ctx.acp.drainEvents;
+          const failure = ctx.assistantReply.failure;
+          if (ctx.promptsInFlight === 1 && result.stopReason !== "cancelled" && failure) {
+            return yield* new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session/prompt",
+              detail: "Cursor reported a transport failure.",
+              cause: failure,
+            });
+          }
 
           const turnRecord = ctx.turns.find((turn) => turn.id === turnId);
           if (turnRecord) {
@@ -1048,30 +1102,6 @@ export function makeCursorAdapter(
           // superseded prompt resolving (usually cancelled) while another is
           // in flight or pending must leave the merged turn running.
           if (ctx.promptsInFlight === 1) {
-            // A transport-killed turn comes back from `session/prompt` as a
-            // success with `stopReason: "end_turn"`, so the stop reason cannot
-            // distinguish it. The provider's own error line, emitted as the last
-            // thing on the stream, is the only signal that the turn produced
-            // nothing. Recording that as `completed` is how five dead threads
-            // looked idle instead of crashed.
-            //
-            // `session/prompt` can resolve while the notification fiber is still
-            // behind the queue: the final ContentDelta may be queued but not yet
-            // folded into `ctx.trailingText`. The barrier is acknowledged only
-            // after every event queued ahead of it has been applied, so draining
-            // first is what makes the classification below read the completed
-            // buffer instead of racing it. stopSession interrupts that fiber,
-            // which would leave the barrier unacknowledged forever, so a dying
-            // consumer loses the race instead of hanging the turn.
-            if (ctx.notificationFiber !== undefined) {
-              yield* Effect.raceFirst(ctx.acp.drainEvents, Fiber.await(ctx.notificationFiber));
-            } else {
-              yield* ctx.acp.drainEvents;
-            }
-            const failure =
-              result.stopReason === "cancelled"
-                ? undefined
-                : providerTransportFailure(ctx.trailingText);
             yield* offerRuntimeEvent({
               type: "turn.completed",
               ...(yield* makeEventStamp()),
@@ -1079,18 +1109,11 @@ export function makeCursorAdapter(
               threadId: input.threadId,
               turnId,
               payload: {
-                state:
-                  result.stopReason === "cancelled"
-                    ? "cancelled"
-                    : failure
-                      ? "failed"
-                      : "completed",
+                state: result.stopReason === "cancelled" ? "cancelled" : "completed",
                 stopReason: result.stopReason ?? null,
-                ...(failure ? { errorMessage: transportFailureMessage(failure) } : {}),
               },
             });
           }
-          ctx.trailingText = "";
 
           return {
             threadId: input.threadId,
@@ -1164,7 +1187,7 @@ export function makeCursorAdapter(
 
     const rollbackThread: CursorAdapterShape["rollbackThread"] = (threadId, numTurns) =>
       Effect.gen(function* () {
-        const ctx = yield* requireSession(threadId);
+        yield* requireSession(threadId);
         if (!Number.isInteger(numTurns) || numTurns < 1) {
           return yield* new ProviderAdapterValidationError({
             provider: PROVIDER,
@@ -1172,9 +1195,11 @@ export function makeCursorAdapter(
             issue: "numTurns must be an integer >= 1.",
           });
         }
-        const nextLength = Math.max(0, ctx.turns.length - numTurns);
-        ctx.turns.splice(nextLength);
-        return { threadId, turns: ctx.turns };
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "thread/rollback",
+          detail: "Cursor ACP sessions do not support provider-side rollback.",
+        });
       });
 
     const stopSession: CursorAdapterShape["stopSession"] = (threadId) =>
@@ -1212,7 +1237,8 @@ export function makeCursorAdapter(
 
     return {
       provider: PROVIDER,
-      capabilities: { sessionModelSwitch: "in-session" },
+      capabilities: { sessionModelSwitch: "in-session", supportsConversationRollback: false },
+      compaction: { type: "slash-command", command: "/compress" },
       startSession,
       sendTurn,
       interruptTurn,

@@ -49,7 +49,7 @@ const ServerLockHolderFromJson = Schema.fromJsonString(ServerLockHolder);
 const decodeHolder = Schema.decodeUnknownOption(ServerLockHolderFromJson);
 const encodeHolder = Schema.encodeSync(ServerLockHolderFromJson);
 
-export class ServerAlreadyRunningError extends Schema.TaggedErrorClass<ServerAlreadyRunningError>()(
+export class ServerAlreadyRunningError extends Schema.TaggedError<ServerAlreadyRunningError>()(
   "ServerAlreadyRunningError",
   {
     stateDir: Schema.String,
@@ -80,7 +80,7 @@ export class ServerAlreadyRunningError extends Schema.TaggedErrorClass<ServerAlr
   }
 }
 
-export class ServerLockUnavailableError extends Schema.TaggedErrorClass<ServerLockUnavailableError>()(
+export class ServerLockUnavailableError extends Schema.TaggedError<ServerLockUnavailableError>()(
   "ServerLockUnavailableError",
   {
     lockPath: Schema.String,

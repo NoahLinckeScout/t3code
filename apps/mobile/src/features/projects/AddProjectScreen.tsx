@@ -31,7 +31,13 @@ import {
   inferProjectTitleFromPath,
   isWindowsPlatform,
 } from "@t3tools/client-runtime/state/projects";
-import { CommandId, type EnvironmentId, ProjectId } from "@t3tools/contracts";
+import {
+  CommandId,
+  type EnvironmentId,
+  type EnvironmentMachineKind,
+  ProjectId,
+  resolveEnvironmentMachineKind,
+} from "@t3tools/contracts";
 import { CommonActions, StackActions, useNavigation } from "@react-navigation/native";
 import { SymbolView } from "../../components/AppSymbol";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -43,15 +49,15 @@ import * as Order from "effect/Order";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { cn } from "../../lib/cn";
 
-import { useProjects, useServerConfigs } from "../../state/entities";
+import { useProjects, useServerConfigs, waitForProject } from "../../state/entities";
 import { filesystemEnvironment } from "../../state/filesystem";
 import { projectEnvironment } from "../../state/projects";
 import { useEnvironmentQuery } from "../../state/query";
 import { sourceControlEnvironment } from "../../state/sourceControl";
 import { AppText as Text, AppTextInput as TextInput } from "../../components/AppText";
+import { EnvironmentMachineSymbol } from "../../components/EnvironmentMachineSymbol";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { SourceControlIcon } from "../../components/SourceControlIcon";
-import { useThemeColor } from "../../lib/useThemeColor";
 import { uuidv4 } from "../../lib/uuid";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
@@ -66,10 +72,13 @@ interface EnvironmentOption {
   readonly environmentId: EnvironmentId;
   readonly label: string;
   readonly platform: string;
+  readonly machine: EnvironmentMachineKind;
   readonly baseDirectory: string | null;
   readonly connectionState: EnvironmentConnectionPhase;
   readonly connectionError: string | null;
   readonly connectionErrorTraceId: string | null;
+  /** Server runs clones in the background and streams progress; older servers block. */
+  readonly supportsCloneTracking: boolean;
 }
 
 const environmentOptionOrder = Order.mapInput(
@@ -103,6 +112,7 @@ function sourceFromParam(value: string | string[] | undefined): AddProjectRemote
     source === "url" ||
     source === "github" ||
     source === "gitlab" ||
+    source === "forgejo" ||
     source === "bitbucket" ||
     source === "azure-devops"
   ) {
@@ -159,8 +169,6 @@ function ListRow(props: {
   readonly right?: ReactNode;
   readonly onPress?: () => void;
 }) {
-  const chevronColor = useThemeColor("--color-chevron");
-
   return (
     <Pressable
       disabled={props.disabled}
@@ -192,7 +200,12 @@ function ListRow(props: {
         {"right" in props ? (
           props.right
         ) : !props.disabled ? (
-          <SymbolView name="chevron.right" size={13} tintColor={chevronColor} type="monochrome" />
+          <SymbolView
+            name="chevron.right"
+            size={13}
+            tintColorClassName={"accent-chevron"}
+            type="monochrome"
+          />
         ) : null}
       </View>
     </Pressable>
@@ -205,8 +218,6 @@ function PrimaryActionButton(props: {
   readonly loading?: boolean;
   readonly onPress: () => void;
 }) {
-  const primaryForeground = useThemeColor("--color-primary-foreground");
-
   return (
     <Pressable
       disabled={props.disabled}
@@ -214,7 +225,7 @@ function PrimaryActionButton(props: {
       className="h-12 items-center justify-center rounded-full bg-primary active:opacity-70 disabled:opacity-45"
     >
       {props.loading ? (
-        <ActivityIndicator color={String(primaryForeground)} />
+        <ActivityIndicator colorClassName={String("accent-primary-foreground")} />
       ) : (
         <Text className="text-base font-t3-bold text-primary-foreground">{props.label}</Text>
       )}
@@ -352,10 +363,12 @@ function useEnvironmentOptions(): ReadonlyArray<EnvironmentOption> {
         environmentId: connection.environmentId,
         label: connection.environmentLabel,
         platform: platformFromOs(config?.environment.platform.os ?? null),
+        machine: resolveEnvironmentMachineKind(config ?? null),
         baseDirectory: config?.settings.addProjectBaseDirectory ?? null,
         connectionState: runtime?.connectionState ?? "available",
         connectionError: runtime?.connectionError ?? null,
         connectionErrorTraceId: runtime?.connectionErrorTraceId ?? null,
+        supportsCloneTracking: config?.environment.capabilities.projectCloneTracking === true,
       };
     });
     return Arr.sort(options, environmentOptionOrder);
@@ -414,7 +427,6 @@ function SourceControlRow(props: {
   readonly isFirst: boolean;
 }) {
   const navigation = useNavigation();
-  const iconColor = useThemeColor("--color-icon");
   const title =
     props.source === "url" ? "Git URL" : `${addProjectRemoteSourceLabel(props.source)} repository`;
   const subtitle =
@@ -423,9 +435,9 @@ function SourceControlRow(props: {
       : `Clone ${addProjectRemoteSourceLabel(props.source)} ${props.hint}`;
   const icon =
     props.source === "url" ? (
-      <SymbolView name="link" size={17} tintColor={iconColor} type="monochrome" />
+      <SymbolView name="link" size={17} tintColorClassName={"accent-icon"} type="monochrome" />
     ) : (
-      <SourceControlIcon kind={props.source} size={18} color={String(iconColor)} />
+      <SourceControlIcon kind={props.source} size={18} colorClassName="accent-icon" />
     );
 
   if (!props.ready) {
@@ -454,8 +466,6 @@ function SourceControlRow(props: {
 
 export function AddProjectSourceScreen() {
   const navigation = useNavigation();
-  const accentColor = useThemeColor("--color-icon-muted");
-  const iconColor = useThemeColor("--color-icon");
   const { environmentOptions, selectedEnvironment, setSelectedEnvironmentId } =
     useSelectedEnvironment();
   const discoveryState = useEnvironmentQuery(
@@ -493,11 +503,10 @@ export function AddProjectSourceScreen() {
                       })
                 }
                 icon={
-                  <SymbolView
-                    name="server.rack"
+                  <EnvironmentMachineSymbol
+                    kind={environment.machine}
                     size={17}
-                    tintColor={iconColor}
-                    type="monochrome"
+                    tintColorClassName="accent-icon"
                   />
                 }
                 selected={environment.environmentId === selectedEnvironment?.environmentId}
@@ -508,7 +517,7 @@ export function AddProjectSourceScreen() {
                     <SymbolView
                       name="checkmark"
                       size={14}
-                      tintColor={iconColor}
+                      tintColorClassName={"accent-icon"}
                       type="monochrome"
                     />
                   ) : null
@@ -530,7 +539,7 @@ export function AddProjectSourceScreen() {
                 <SymbolView
                   name="folder.badge.plus"
                   size={17}
-                  tintColor={iconColor}
+                  tintColorClassName={"accent-icon"}
                   type="monochrome"
                 />
               }
@@ -560,10 +569,21 @@ export function AddProjectSourceScreen() {
               ),
             )}
           </ListSection>
-          {discoveryState.isPending ? <ActivityIndicator color={accentColor} /> : null}
+          {discoveryState.isPending ? (
+            <ActivityIndicator colorClassName={"accent-icon-muted"} />
+          ) : null}
         </>
       ) : null}
     </AddProjectShell>
+  );
+}
+
+function openNewTaskDraft(
+  navigation: { dispatch: (action: ReturnType<typeof CommonActions.reset>) => void },
+  params: { environmentId: EnvironmentId; projectId: ProjectId; title: string; cloning?: "1" },
+) {
+  navigation.dispatch(
+    CommonActions.reset({ index: 0, routes: [{ name: "NewTaskDraft", params }] }),
   );
 }
 
@@ -745,7 +765,6 @@ function FolderBrowser(props: {
   }) => Promise<boolean>;
   readonly pinnedDirectoryName?: string;
 }) {
-  const accentColor = useThemeColor("--color-icon-muted");
   const browsePath = useMemo(
     () => getFilesystemBrowsePath(props.pathInput, props.environment.platform),
     [props.environment.platform, props.pathInput],
@@ -781,7 +800,7 @@ function FolderBrowser(props: {
       <ListSection>
         {browseState.isPending && browseState.data === null ? (
           <View className="items-center py-5">
-            <ActivityIndicator color={accentColor} />
+            <ActivityIndicator colorClassName={"accent-icon-muted"} />
           </View>
         ) : null}
         {browsePath.canBrowseUp ? (
@@ -791,7 +810,7 @@ function FolderBrowser(props: {
               <SymbolView
                 name="arrow.turn.left.up"
                 size={17}
-                tintColor={accentColor}
+                tintColorClassName={"accent-icon-muted"}
                 type="monochrome"
               />
             }
@@ -810,7 +829,14 @@ function FolderBrowser(props: {
           <ListRow
             key={entry.fullPath}
             title={entry.name}
-            icon={<SymbolView name="folder" size={17} tintColor={accentColor} type="monochrome" />}
+            icon={
+              <SymbolView
+                name="folder"
+                size={17}
+                tintColorClassName={"accent-icon-muted"}
+                type="monochrome"
+              />
+            }
             isFirst={index === 0 && !browsePath.canBrowseUp}
             right={null}
             onPress={() => {
@@ -894,6 +920,10 @@ export function AddProjectDestinationScreen(props: {
   const cloneRepository = useAtomCommand(sourceControlEnvironment.cloneRepository, {
     reportFailure: false,
   });
+  const startProjectClone = useAtomCommand(sourceControlEnvironment.startProjectClone, {
+    reportFailure: false,
+  });
+  const navigation = useNavigation();
   const environment = useEnvironmentFromParam(props.environmentId);
   const createProject = useCreateProject(environment);
   const remoteUrl = stringParam(props.remoteUrl);
@@ -924,6 +954,48 @@ export function AddProjectDestinationScreen(props: {
     }
 
     setIsSubmitting(true);
+    if (environment.supportsCloneTracking) {
+      // The server creates the project and clones in the background; the
+      // draft screen shows progress and holds Start until the files land.
+      const projectId = ProjectId.make(uuidv4());
+      const title = inferProjectTitleFromPath(resolved.path);
+      const startResult = await startProjectClone({
+        environmentId: environment.environmentId,
+        input: {
+          projectId,
+          title,
+          createdAt: new Date().toISOString(),
+          remoteUrl,
+          destinationPath: resolved.path,
+        },
+      });
+      if (AsyncResult.isFailure(startResult)) {
+        setError(errorMessage(Cause.squash(startResult.cause)));
+      } else {
+        // The draft screen resolves its project from the client store, so it
+        // must not open before the create event has arrived (it would fall
+        // back to the project picker and lose the clone controls). Stay in
+        // the submitting state until then; the clone keeps running either way.
+        const project = await waitForProject(
+          { environmentId: environment.environmentId, projectId },
+          15_000,
+        );
+        if (project === null) {
+          setError(
+            "The project was created but has not reached this device yet. It will appear in the project list once the connection catches up.",
+          );
+        } else {
+          openNewTaskDraft(navigation, {
+            environmentId: environment.environmentId,
+            projectId,
+            title,
+            cloning: "1",
+          });
+        }
+      }
+      setIsSubmitting(false);
+      return;
+    }
     const cloneResult = await cloneRepository({
       environmentId: environment.environmentId,
       input: {
@@ -946,8 +1018,10 @@ export function AddProjectDestinationScreen(props: {
     environment,
     isBrowseNavigating,
     isSubmitting,
+    navigation,
     pathInput,
     remoteUrl,
+    startProjectClone,
   ]);
 
   return (

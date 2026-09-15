@@ -18,6 +18,8 @@ import {
   failEnvironmentNotFound,
   requireEnvironmentScope,
 } from "../auth/http.ts";
+import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
+import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
 
 export const orchestrationHttpApiLayer = HttpApiBuilder.group(
@@ -26,6 +28,8 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
     const clientCommandDispatch = yield* ClientOrchestrationCommandDispatch;
+    const orchestrationEngine = yield* OrchestrationEngineService;
+    const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
 
     return handlers
       .handle(
@@ -94,6 +98,14 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
         Effect.fn("environment.orchestration.dispatch")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           const session = yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          yield* ProjectCloneTracker.rejectCommandsDuringClone(
+            projectCloneTracker,
+            args.payload,
+          ).pipe(
+            Effect.catch((cause) =>
+              failEnvironmentInternal("orchestration_dispatch_failed", cause),
+            ),
+          );
           const normalizedCommand = yield* normalizeDispatchCommand(args.payload).pipe(
             Effect.catch(() => failEnvironmentInvalidRequest("invalid_command")),
           );
@@ -115,14 +127,21 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
             }
           }
 
-          return yield* clientCommandDispatch.dispatch(normalizedCommand, { selfIdentity }).pipe(
-            Effect.tapError(() =>
-              cleanupFailedUploadedAttachments(args.payload, normalizedCommand),
-            ),
-            Effect.catch((cause) =>
-              failEnvironmentInternal("orchestration_dispatch_failed", cause),
-            ),
+          const result = yield* clientCommandDispatch
+            .dispatch(normalizedCommand, { selfIdentity })
+            .pipe(
+              Effect.tapError(() =>
+                cleanupFailedUploadedAttachments(args.payload, normalizedCommand),
+              ),
+              Effect.catch((cause) =>
+                failEnvironmentInternal("orchestration_dispatch_failed", cause),
+              ),
+            );
+          yield* ProjectCloneTracker.discardCloneForDeletedProject(
+            projectCloneTracker,
+            normalizedCommand,
           );
+          return result;
         }),
       );
   }),

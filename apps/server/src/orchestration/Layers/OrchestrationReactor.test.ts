@@ -6,10 +6,13 @@ import * as Scope from "effect/Scope";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
-import { DelegationWakeReactor } from "./DelegationWakeReactor.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
+import * as ThreadSettlementReactor from "../ThreadSettlementReactor.ts";
+import * as PullRequestSyncReactor from "../PullRequestSyncReactor.ts";
+import * as ThreadPullRequestReactor from "../ThreadPullRequestReactor.ts";
+import { DelegationWakeReactor } from "./DelegationWakeReactor.ts";
 import { OrchestrationReactor } from "../Services/OrchestrationReactor.ts";
 import { makeOrchestrationReactor } from "./OrchestrationReactor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
@@ -24,7 +27,7 @@ describe("OrchestrationReactor", () => {
     runtime = null;
   });
 
-  it("starts provider ingestion, provider command, checkpoint, thread deletion, and delegation wake reactors", async () => {
+  it("starts every orchestration reactor", async () => {
     const started: string[] = [];
 
     runtime = ManagedRuntime.make(
@@ -62,7 +65,7 @@ describe("OrchestrationReactor", () => {
               started.push("thread-deletion-reactor");
               return Effect.void;
             },
-            drain: Effect.void,
+            drainThrough: () => Effect.void,
           }),
         ),
         Layer.provideMerge(
@@ -72,6 +75,34 @@ describe("OrchestrationReactor", () => {
               return Effect.void;
             },
             drain: Effect.void,
+          }),
+        ),
+        Layer.provideMerge(
+          Layer.succeed(ThreadPullRequestReactor.ThreadPullRequestReactor, {
+            start: () => {
+              started.push("thread-pull-request-reactor");
+              return Effect.void;
+            },
+            drain: Effect.void,
+          }),
+        ),
+        Layer.provideMerge(
+          Layer.succeed(ThreadSettlementReactor.ThreadSettlementReactor, {
+            start: () => {
+              started.push("thread-settlement-reactor");
+              return Effect.void;
+            },
+            drain: Effect.void,
+          }),
+        ),
+        Layer.provideMerge(
+          Layer.succeed(PullRequestSyncReactor.PullRequestSyncReactor, {
+            start: () => {
+              started.push("pull-request-sync-reactor");
+              return Effect.void;
+            },
+            drain: Effect.void,
+            requestSync: () => Effect.void,
           }),
         ),
         Layer.provideMerge(
@@ -96,6 +127,9 @@ describe("OrchestrationReactor", () => {
       "checkpoint-reactor",
       "thread-deletion-reactor",
       "delegation-wake-reactor",
+      "thread-pull-request-reactor",
+      "thread-settlement-reactor",
+      "pull-request-sync-reactor",
       "agent-awareness-relay",
     ]);
 
