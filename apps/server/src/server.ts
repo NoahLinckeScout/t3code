@@ -600,6 +600,9 @@ export const makeRoutesLayer = Layer.mergeAll(
   // and mutations observed on WebSocket invalidate patches subsequently read over HTTP.
   Layer.provide(PullRequestServiceLive),
   Layer.provide(PreviewAutomationBroker.layer),
+  // The orchestration MCP toolkit reads and writes delegation state. This is the
+  // same layer reference the runtime provides, so one MemoMap builds one client.
+  Layer.provide(SqlitePersistenceLayerLive),
   Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(DesktopAppUpdateLayerLive))),
   Layer.provide(commandReadinessLayer),
   Layer.provide(browserApiCorsLayer),

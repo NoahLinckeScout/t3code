@@ -20,6 +20,10 @@ import * as DeviceService from "../device/DeviceService.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import * as DelegationStore from "./toolkits/orchestration/DelegationStore.ts";
+import { OrchestrationToolkitHandlersLive } from "./toolkits/orchestration/handlers.ts";
+import * as OrchestrationRoles from "./toolkits/orchestration/roles.ts";
+import { OrchestrationToolkit } from "./toolkits/orchestration/tools.ts";
 import {
   PreviewSnapshotToolkitHandlersLive,
   PreviewStandardToolkitHandlersLive,
@@ -621,6 +625,15 @@ export const DeviceToolkitRegistrationLive = Layer.mergeAll(
   DeviceScreenshotRegistrationLive,
 );
 
+export const OrchestrationToolkitRegistrationLive = McpServer.toolkit(OrchestrationToolkit).pipe(
+  Layer.provide(
+    OrchestrationToolkitHandlersLive.pipe(
+      Layer.provide(DelegationStore.layer),
+      Layer.provide(OrchestrationRoles.layer),
+    ),
+  ),
+);
+
 const McpTransportLive = McpServer.layerHttp({
   name: "T3 Code",
   version: packageJson.version,
@@ -632,4 +645,5 @@ export const layer = Layer.mergeAll(
   PreviewToolkitRegistrationLive,
   PullRequestsToolkitRegistrationLive,
   DeviceToolkitRegistrationLive,
+  OrchestrationToolkitRegistrationLive,
 ).pipe(Layer.provideMerge(McpTransportLive));
