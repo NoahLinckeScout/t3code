@@ -14,6 +14,7 @@ import {
   TrimmedNonEmptyString,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+import { Tool } from "effect/unstable/ai";
 
 /**
  * A delegation's identity is its own, not the child thread's.
@@ -206,8 +207,13 @@ export type MessageResult = typeof MessageResult.Type;
  *
  * It also sidesteps the measured tool-call failure entirely: a schema with no
  * required fields cannot be got wrong by a model that sometimes emits `{}`.
+ *
+ * `Tool.EmptyParams` rather than `Schema.Struct({})`: under effect rc.112 an
+ * empty struct serializes to `anyOf[object, array]`, which has no root
+ * `type: "object"` and fails MCP `ToolJsonSchema` validation at toolkit
+ * registration — killing the whole server layer, not just this tool.
  */
-export const SettleSelfInput = Schema.Struct({});
+export const SettleSelfInput = Tool.EmptyParams;
 
 export const SettleSelfResult = Schema.Struct({
   /** True when the thread was settled now; false when the request was recorded for later. */
@@ -268,9 +274,10 @@ export type InboxResult = typeof InboxResult.Type;
 
 /**
  * No arguments, like `agent_settle_self`: the answer is the calling thread, and
- * a caller-supplied id would defeat the only reason to ask.
+ * a caller-supplied id would defeat the only reason to ask. `Tool.EmptyParams`
+ * for the same reason as {@link SettleSelfInput}.
  */
-export const WhoamiInput = Schema.Struct({});
+export const WhoamiInput = Tool.EmptyParams;
 
 export const WhoamiResult = Schema.Struct({
   threadId: ThreadId,
