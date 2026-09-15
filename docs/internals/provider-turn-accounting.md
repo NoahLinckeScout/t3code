@@ -75,7 +75,53 @@ covered by tests in `CursorAdapter.test.ts` driving the real mock ACP agent.
 Only the trailing 4 KiB of a turn is retained, so this costs the same on a turn
 that streams megabytes.
 
-## What could not be fixed here: the missing error detail
+## The other half: unmodelled provider output is no longer discarded
+
+`AcpRuntimeModel.parseSessionUpdateEvent` used to end like this:
+
+```ts
+case "agent_message_chunk": {
+  if (upd.content.type === "text" && upd.content.text.length > 0) { /* emit */ }
+  break;
+}
+default:
+  break;
+```
+
+Two silent discards. An `agent_message_chunk` whose content was not plain text
+produced nothing, and **every session update variant this build does not model
+was dropped with no trace at all**.
+
+That second one matters more than it looks. ACP content blocks include
+`resource_link`, which carries `title` and `description` — precisely where a
+provider would put the human-readable half of an error it otherwise reports as a
+bare code — and every block carries `_meta`, the protocol's blessed extensibility
+channel. A vendor extension using either would have vanished here.
+
+It was also unrecoverable after the fact, because native payload logging
+summarises values away:
+
+```ts
+function summarizePayload(payload) { ... return { valueType: "object", fieldCount: ... } }
+```
+
+So the logs record that _something_ arrived and never what it said. Grepping them
+for a missing error string can only ever return nothing, which is not evidence
+that nothing was sent.
+
+Now:
+
+- `contentBlockText` renders `resource_link` (title, description, uri) and
+  embedded text `resource` blocks into the transcript instead of dropping them.
+- Binary blocks are still not inlined, but are **reported** rather than dropped.
+- An unmodelled `sessionUpdate` variant is reported with a bounded excerpt of its
+  payload.
+- `AcpSessionRuntime` logs any such discard at warning level with the variant
+  name and excerpt.
+
+This is shared by the Cursor and Grok adapters, both of which speak ACP.
+
+## What still could not be fixed here: the missing error detail
 
 A `[resource_exhausted]` failure was reasonably read as hitting a Cursor account
 limit, when Cursor's own `ErrorDetails` reportedly said _"Unable to reach the
@@ -88,12 +134,26 @@ that turn, verbatim, is:
 Error: RetriableError: [resource_exhausted] Error
 ```
 
-The whole detail is the word `Error`. The phrase "Unable to reach the model
-provider" appears nowhere in any provider event log or any provider-authored
-message in the database. So T3 Code is not swallowing a title and detail it was
-given; `cursor-agent` never sent them, and there is nothing here to forward.
-Recovering them would mean reading `cursor-agent`'s own logs or querying Cursor
-directly, neither of which is in this process's reach.
+The whole detail is the word `Error`, and the phrase "Unable to reach the model
+provider" appears in no provider-authored message in the database.
+
+**That is weaker evidence than it first appears, and an earlier version of this
+document overstated it.** The conclusion drawn then — "`cursor-agent` never sent
+them" — rested partly on grepping provider event logs, which
+`summarizePayload` strips of all values before writing. Those logs could not have
+contained the string whatever the agent sent. Combined with the silent `default:
+break` above, a richer error carried on an unmodelled update variant would have
+left exactly the same trace as never having been sent: none.
+
+What is actually established: the _assistant text_ Cursor produced for that turn
+was the short line, and the `session/prompt` result carried a single field
+(`fieldCount: 1`, the stop reason). What is not established is whether anything
+richer arrived on a channel this build discarded.
+
+The discard reporting above closes that gap going forward. The next occurrence
+logs the variant and a bounded excerpt, which answers the question with evidence
+instead of inference. Until one occurs, "Cursor sent nothing richer" should be
+treated as unproven rather than false.
 
 `transportFailureMessage` therefore preserves the provider's line verbatim and,
 when the detail is empty or the bare word `Error`, says so explicitly rather than
