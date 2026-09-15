@@ -109,6 +109,11 @@ import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as ServerConfig from "./config.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import { HTTP_ROUTER_CONFIG, makeRoutesLayer } from "./server.ts";
+import * as OrchestrationAgentCommandDispatchModule from "./orchestration/Services/ClientOrchestrationCommandDispatch.ts";
+import * as DelegationStoreLayer from "./mcp/toolkits/orchestration/DelegationStore.ts";
+import * as OrchestrationRolesLayer from "./mcp/toolkits/orchestration/roles.ts";
+import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
+import { OrchestrationCommandReceiptRepositoryLive } from "./persistence/Layers/OrchestrationCommandReceipts.ts";
 import {
   isThreadDetailEvent,
   resolveAvailableEditorsForConfig,
@@ -753,6 +758,18 @@ const buildAppUnderTest = (options?: {
       Layer.provide(Layer.succeed(HostProcessEnvironment, {})),
     );
 
+    // The agent command runner that client dispatch routes `agent.*` to. Its
+    // handler dependencies (store, roles, crypto, receipts) resolve through
+    // the real sqlite persistence layer and the engine mock provided below.
+    const orchestrationDispatchTestLayer = Layer.mergeAll(
+      OrchestrationAgentCommandDispatchModule.ClientOrchestrationCommandDispatchLive,
+    ).pipe(
+      Layer.provide(OrchestrationCommandReceiptRepositoryLive),
+      Layer.provide(DelegationStoreLayer.layer),
+      Layer.provide(OrchestrationRolesLayer.layer),
+      Layer.provide(SqlitePersistenceLayerLive),
+    );
+
     const servedRoutesLayer = HttpRouter.serve(
       makeRoutesLayer.pipe(Layer.provide(serviceLauncherClientLayer)),
       {
@@ -763,6 +780,7 @@ const buildAppUnderTest = (options?: {
     ).pipe(
       Layer.provide(
         Layer.mergeAll(
+          orchestrationDispatchTestLayer,
           Layer.mock(Keybindings.Keybindings)({
             loadConfigState: Effect.succeed({
               keybindings: [],

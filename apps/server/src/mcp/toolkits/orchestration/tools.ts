@@ -2,7 +2,7 @@ import * as Crypto from "effect/Crypto";
 import { Tool, Toolkit } from "effect/unstable/ai";
 
 import { OrchestrationEngineService } from "../../../orchestration/Services/OrchestrationEngine.ts";
-import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import { OrchestrationActor } from "./actor.ts";
 import { DelegationStore } from "./DelegationStore.ts";
 import { OrchestrationRoles } from "./roles.ts";
 import {
@@ -17,10 +17,12 @@ import {
   SettleSelfResult,
   SpawnInput,
   SpawnResult,
+  WhoamiInput,
+  WhoamiResult,
 } from "./schemas.ts";
 
 const dependencies = [
-  McpInvocationContext.McpInvocationContext,
+  OrchestrationActor,
   DelegationStore,
   OrchestrationRoles,
   OrchestrationEngineService,
@@ -93,10 +95,24 @@ export const AgentSettleSelfTool = Tool.make("agent_settle_self", {
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
 
+export const AgentWhoamiTool = Tool.make("agent_whoami", {
+  description:
+    "Return this thread's id. Call it before addressing anything by threadId: the id is issued by the server, never guessed. Takes no arguments.",
+  parameters: WhoamiInput,
+  success: WhoamiResult,
+  failure: OrchestrationToolkitError,
+  dependencies,
+})
+  .annotate(Tool.Title, "Identify this thread")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
 export const OrchestrationToolkit = Toolkit.make(
   AgentSpawnTool,
   AgentHandoffTool,
   AgentMessageTool,
   AgentInboxTool,
   AgentSettleSelfTool,
+  AgentWhoamiTool,
 );

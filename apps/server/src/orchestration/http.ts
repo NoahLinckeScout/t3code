@@ -9,6 +9,8 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import { projectThreadDetailSnapshot } from "./ActivityPayloadProjection.ts";
 import { cleanupFailedUploadedAttachments, normalizeDispatchCommand } from "./Normalizer.ts";
+import { ClientOrchestrationCommandDispatch } from "./Services/ClientOrchestrationCommandDispatch.ts";
+import { selfIdentityFromSessionSubject } from "./Services/OrchestrationSelfIdentity.ts";
 import {
   annotateEnvironmentRequest,
   failEnvironmentInternal,
@@ -17,7 +19,6 @@ import {
   requireEnvironmentScope,
 } from "../auth/http.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
-import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
 
 export const orchestrationHttpApiLayer = HttpApiBuilder.group(
@@ -25,7 +26,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
   "orchestration",
   Effect.fnUntraced(function* (handlers) {
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
-    const orchestrationEngine = yield* OrchestrationEngineService;
+    const clientCommandDispatch = yield* ClientOrchestrationCommandDispatch;
     const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
 
     return handlers
@@ -94,7 +95,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
         "dispatch",
         Effect.fn("environment.orchestration.dispatch")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          const session = yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
           yield* ProjectCloneTracker.rejectCommandsDuringClone(
             projectCloneTracker,
             args.payload,
@@ -106,14 +107,34 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
           const normalizedCommand = yield* normalizeDispatchCommand(args.payload).pipe(
             Effect.catch(() => failEnvironmentInvalidRequest("invalid_command")),
           );
-          const result = yield* orchestrationEngine.dispatch(normalizedCommand).pipe(
-            Effect.tapError(() =>
-              cleanupFailedUploadedAttachments(args.payload, normalizedCommand),
-            ),
-            Effect.catch((cause) =>
-              failEnvironmentInternal("orchestration_dispatch_failed", cause),
-            ),
-          );
+
+          // A thread-bound session answers `agent.whoami` with the thread its
+          // subject names; an unbound session fails closed inside the service.
+          // The binding is verified against the projections so a subject that
+          // names a deleted or never-created thread cannot pass as identity.
+          const selfIdentity = selfIdentityFromSessionSubject(session.subject);
+          if (normalizedCommand.type === "agent.whoami") {
+            const selfThreadId = yield* selfIdentity.selfThreadId.pipe(
+              Effect.catch(() => failEnvironmentInvalidRequest("invalid_command")),
+            );
+            const thread = yield* projectionSnapshotQuery
+              .getThreadShellById(selfThreadId)
+              .pipe(Effect.catch(() => failEnvironmentInternal("orchestration_dispatch_failed")));
+            if (Option.isNone(thread)) {
+              return yield* failEnvironmentInvalidRequest("invalid_command");
+            }
+          }
+
+          const result = yield* clientCommandDispatch
+            .dispatch(normalizedCommand, { selfIdentity })
+            .pipe(
+              Effect.tapError(() =>
+                cleanupFailedUploadedAttachments(args.payload, normalizedCommand),
+              ),
+              Effect.catch((cause) =>
+                failEnvironmentInternal("orchestration_dispatch_failed", cause),
+              ),
+            );
           yield* ProjectCloneTracker.discardCloneForDeletedProject(
             projectCloneTracker,
             normalizedCommand,

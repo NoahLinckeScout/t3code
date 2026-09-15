@@ -100,6 +100,7 @@ import {
   normalizeDispatchCommand,
 } from "./orchestration/Normalizer.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
+import * as ClientOrchestrationCommandDispatchModule from "./orchestration/Services/ClientOrchestrationCommandDispatch.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ThreadDeletionReactor } from "./orchestration/Services/ThreadDeletionReactor.ts";
 import {
@@ -515,6 +516,8 @@ const makeWsRpcLayer = (
             );
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
       const threadDeletionReactor = yield* ThreadDeletionReactor;
+      const clientCommandDispatch =
+        yield* ClientOrchestrationCommandDispatchModule.ClientOrchestrationCommandDispatch;
       const analytics = yield* AnalyticsService.AnalyticsService;
       // Every command dispatched on this connection carries the connecting
       // client's origin, including server-generated bootstrap sub-commands:
@@ -1724,19 +1727,24 @@ const makeWsRpcLayer = (
         const dispatchEffect =
           normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
             ? dispatchBootstrapTurnStart(normalizedCommand)
-            : dispatchFromClient(normalizedCommand).pipe(
-                Effect.tap(({ sequence }) =>
-                  // Returning from thread.create is the handoff point at which
-                  // clients may start resources for the new incarnation. Use
-                  // its event sequence as the exact deletion-cleanup fence.
-                  normalizedCommand.type === "thread.create"
-                    ? threadDeletionReactor.drainThrough(sequence)
-                    : Effect.void,
-                ),
-                Effect.mapError((cause) =>
-                  toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
-                ),
-              );
+            : // The dispatch boundary intercepts `agent.*` commands for the
+              // agent command runner; everything else reaches the engine with
+              // the client origin stamped as before.
+              clientCommandDispatch
+                .dispatch(normalizedCommand, hasClientOrigin ? { origin: clientOrigin } : undefined)
+                .pipe(
+                  Effect.tap((result) =>
+                    // Returning from thread.create is the handoff point at which
+                    // clients may start resources for the new incarnation. Use
+                    // its event sequence as the exact deletion-cleanup fence.
+                    normalizedCommand.type === "thread.create" && "sequence" in result
+                      ? threadDeletionReactor.drainThrough(result.sequence)
+                      : Effect.void,
+                  ),
+                  Effect.mapError((cause) =>
+                    toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
+                  ),
+                );
 
         return startup
           .enqueueCommand(dispatchEffect)

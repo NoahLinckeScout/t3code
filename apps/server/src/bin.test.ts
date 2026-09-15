@@ -37,10 +37,14 @@ import * as ServerConfig from "./config.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
+import * as OrchestrationAgentCommandDispatchModule from "./orchestration/Services/ClientOrchestrationCommandDispatch.ts";
+import * as DelegationStoreLayer from "./mcp/toolkits/orchestration/DelegationStore.ts";
+import * as OrchestrationRolesLayer from "./mcp/toolkits/orchestration/roles.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import { orchestrationHttpApiLayer } from "./orchestration/http.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
+import { OrchestrationCommandReceiptRepositoryLive } from "./persistence/Layers/OrchestrationCommandReceipts.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import {
   makePersistedServerRuntimeState,
@@ -375,6 +379,13 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
         ),
       ),
       Layer.provide(environmentAuthenticatedAuthLayer),
+      // The client dispatch layer routes `agent.*` commands; the runner's
+      // handler deps come from the same persistence the server shares.
+      Layer.provide(OrchestrationAgentCommandDispatchModule.ClientOrchestrationCommandDispatchLive),
+      Layer.provide(DelegationStoreLayer.layer),
+      Layer.provide(OrchestrationRolesLayer.layer),
+      Layer.provide(OrchestrationCommandReceiptRepositoryLive),
+      Layer.provide(SqlitePersistenceLayerLive),
     );
     const appLayer = HttpRouter.serve(routesLayer, {
       disableListenLog: true,

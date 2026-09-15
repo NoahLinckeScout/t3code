@@ -6,6 +6,7 @@ import {
   type OrchestrationReactorShape,
 } from "../Services/OrchestrationReactor.ts";
 import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
+import { DelegationWakeReactor, DelegationWakeReactorLive } from "./DelegationWakeReactor.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
@@ -22,6 +23,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const threadSettlementReactor = yield* ThreadSettlementReactor.ThreadSettlementReactor;
   const pullRequestSyncReactor = yield* PullRequestSyncReactor.PullRequestSyncReactor;
   const threadPullRequestReactor = yield* ThreadPullRequestReactor.ThreadPullRequestReactor;
+  const delegationWakeReactor = yield* DelegationWakeReactor;
   const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
 
   const start: OrchestrationReactorShape["start"] = Effect.fn("start")(function* () {
@@ -32,6 +34,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
     yield* threadPullRequestReactor.start();
     yield* threadSettlementReactor.start();
     yield* pullRequestSyncReactor.start();
+    yield* delegationWakeReactor.start();
     yield* agentAwarenessRelay.start();
   });
 
@@ -43,4 +46,4 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
 export const OrchestrationReactorLive = Layer.effect(
   OrchestrationReactor,
   makeOrchestrationReactor,
-);
+).pipe(Layer.provide(DelegationWakeReactorLive));

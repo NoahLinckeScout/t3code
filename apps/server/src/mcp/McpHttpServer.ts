@@ -20,6 +20,7 @@ import * as DeviceService from "../device/DeviceService.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import { OrchestrationActor } from "./toolkits/orchestration/actor.ts";
 import * as DelegationStore from "./toolkits/orchestration/DelegationStore.ts";
 import { OrchestrationToolkitHandlersLive } from "./toolkits/orchestration/handlers.ts";
 import * as OrchestrationRoles from "./toolkits/orchestration/roles.ts";
@@ -106,6 +107,7 @@ const makeMcpAuthMiddleware = McpSessionRegistry.McpSessionRegistry.pipe(
       }
       return yield* httpEffect.pipe(
         Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+        Effect.provideService(OrchestrationActor, { threadId: invocation.threadId }),
         Effect.map(normalizeMcpHttpResponse),
       );
     }),
