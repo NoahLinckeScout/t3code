@@ -1,13 +1,16 @@
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  type EnvironmentInternalError,
   EnvironmentHttpApi,
+  type EnvironmentRequestInvalidError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import { projectThreadDetailSnapshot } from "./ActivityPayloadProjection.ts";
+import { isOrchestrationCommandRejection } from "./Errors.ts";
 import { cleanupFailedUploadedAttachments, normalizeDispatchCommand } from "./Normalizer.ts";
 import { ClientOrchestrationCommandDispatch } from "./Services/ClientOrchestrationCommandDispatch.ts";
 import { selfIdentityFromSessionSubject } from "./Services/OrchestrationSelfIdentity.ts";
@@ -131,8 +134,21 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
               Effect.tapError(() =>
                 cleanupFailedUploadedAttachments(args.payload, normalizedCommand),
               ),
-              Effect.catch((cause) =>
-                failEnvironmentInternal("orchestration_dispatch_failed", cause),
+              // A refused command (invariant violation or a settle blocked by
+              // pending work) is the client's fault, not a server fault: answer
+              // with the precise 400 the decider's detail names instead of the
+              // generic 500, which hides "Thread 'X' already exists and cannot
+              // be created twice." behind orchestration_dispatch_failed.
+              Effect.catch(
+                (
+                  cause,
+                ): Effect.Effect<
+                  never,
+                  EnvironmentInternalError | EnvironmentRequestInvalidError
+                > =>
+                  isOrchestrationCommandRejection(cause)
+                    ? failEnvironmentInvalidRequest("invalid_command", cause.message)
+                    : failEnvironmentInternal("orchestration_dispatch_failed", cause),
               ),
             );
           yield* ProjectCloneTracker.discardCloneForDeletedProject(
