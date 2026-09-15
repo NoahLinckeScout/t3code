@@ -1645,8 +1645,7 @@ describe("applySidebarThreadDrop", () => {
     const preview = applySidebarThreadDrop(source, "settled", now);
     const final = {
       ...source,
-      pinnedAt: null,
-      pinOrderKey: null,
+      // The settle keeps the pin; only the snooze clears.
       snoozedAt: null,
       snoozedUntil: null,
       settledOverride: "settled" as const,

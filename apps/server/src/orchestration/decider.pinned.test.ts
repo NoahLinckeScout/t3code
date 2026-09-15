@@ -183,7 +183,7 @@ it.layer(NodeServices.layer)("pinned thread decider", (it) => {
     }),
   );
 
-  it.effect("settling a pinned thread also unpins it", () =>
+  it.effect("settling a pinned thread keeps the pin", () =>
     Effect.gen(function* () {
       const event = yield* decideOrchestrationCommand({
         command: {
@@ -194,7 +194,10 @@ it.layer(NodeServices.layer)("pinned thread decider", (it) => {
         readModel: makeReadModel({ pinnedAt: PINNED_AT }),
       });
       const events = Array.isArray(event) ? event : [event];
-      expect(events.map((entry) => entry.type)).toEqual(["thread.settled", "thread.unpinned"]);
+      // The pin is a standing user preference: settle hides the row (settled
+      // section precedence) without destroying the preference, so it
+      // re-emerges when the thread is unsettled.
+      expect(events.map((entry) => entry.type)).toEqual(["thread.settled"]);
     }),
   );
 

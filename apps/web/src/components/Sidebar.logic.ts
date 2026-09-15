@@ -329,10 +329,12 @@ export function applySidebarThreadDrop<
   const wasSettled = thread.settledOverride === "settled";
   const awake = { ...thread, snoozedAt: null, snoozedUntil: null };
   if (section === "settled") {
+    // The pin survives a settle server-side: it is out of view in the
+    // settled section (section precedence) and re-emerges on unsettle, so
+    // the preview retains it instead of projecting an unpin that will
+    // never arrive.
     return {
       ...awake,
-      pinnedAt: null,
-      pinOrderKey: null,
       activeOrderKey: null,
       settledOverride: "settled",
       settledAt: wasSettled ? (thread.settledAt ?? now) : now,

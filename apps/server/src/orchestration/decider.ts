@@ -530,8 +530,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           updatedAt: alreadySettled ? thread.updatedAt : occurredAt,
         },
       };
-      // Settling is "I'm done with this": clear states that would keep the
-      // row pinned or snoozed instead of showing the new settled state.
+      // Settling clears states that would fight the settled row for
+      // attention. A pin is not one of them: settled rows render in the
+      // settled section regardless of pinnedAt (section precedence), so the
+      // pin is simply out of view while settled — and destroying it here
+      // would erase a standing user preference on every settle/unsettle
+      // cycle (including automatic ones). The pin survives settle and
+      // re-emerges when the thread is unsettled.
       const companionEvents: Array<Omit<OrchestrationEvent, "sequence">> = [];
       for (const [requestId, request] of pendingRequests) {
         companionEvents.push({
@@ -553,21 +558,6 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
               createdAt: occurredAt,
               payload: { requestId, responseMode: "message" },
             },
-          },
-        });
-      }
-      if (thread.pinnedAt != null) {
-        companionEvents.push({
-          ...(yield* withEventBase({
-            aggregateKind: "thread",
-            aggregateId: command.threadId,
-            occurredAt,
-            commandId: command.commandId,
-          })),
-          type: "thread.unpinned" as const,
-          payload: {
-            threadId: command.threadId,
-            updatedAt: occurredAt,
           },
         });
       }

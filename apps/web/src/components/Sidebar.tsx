@@ -3200,11 +3200,12 @@ export default function Sidebar() {
       return;
     }
     if (optimisticDrop.order === null) {
-      // Settle also emits unpin/unsnooze events. Wait for the entire move
-      // before releasing the projected fields and sort timestamps.
+      // Settle emits unsnooze for snoozed rows but no longer unpins: a pin
+      // survives the settle (it re-emerges on unsettle). Wait for the
+      // section move — and the snooze clear where one is pending — before
+      // releasing the projected fields and sort timestamps.
       if (
         canonicalSection === optimisticDrop.section &&
-        thread.pinnedAt == null &&
         (!optimisticDrop.clearsSnooze || thread.snoozedUntil == null)
       ) {
         setOptimisticDrop(null);

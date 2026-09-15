@@ -76,6 +76,61 @@ it.effect("projects pin lifecycle events", () =>
   }),
 );
 
+it.effect("a pin survives a settle and unsettle cycle", () =>
+  Effect.gen(function* () {
+    const now = "2026-01-01T00:00:00.000Z";
+    const created = yield* projectEvent(
+      createEmptyReadModel(now),
+      makeEvent({
+        sequence: 1,
+        type: "thread.created",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          projectId: ProjectId.make("project-1"),
+          title: "Thread",
+          modelSelection: { provider: "codex", model: "gpt-5.4" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      }),
+    );
+    const pinned = yield* projectEvent(
+      created,
+      makeEvent({
+        sequence: 2,
+        type: "thread.pinned",
+        payload: { threadId: ThreadId.make("thread-1"), pinnedAt: now, updatedAt: now },
+      }),
+    );
+    const settled = yield* projectEvent(
+      pinned,
+      makeEvent({
+        sequence: 3,
+        type: "thread.settled",
+        payload: { threadId: ThreadId.make("thread-1"), settledAt: now, updatedAt: now },
+      }),
+    );
+    expect(settled.threads[0]?.pinnedAt).toBe(now);
+    expect(settled.threads[0]?.settledOverride).toBe("settled");
+    const unsettled = yield* projectEvent(
+      settled,
+      makeEvent({
+        sequence: 4,
+        type: "thread.unsettled",
+        payload: { threadId: ThreadId.make("thread-1"), reason: "user", updatedAt: now },
+      }),
+    );
+    // The pin outlives the settle cycle: the thread returns to the pinned
+    // section instead of silently dropping to active.
+    expect(unsettled.threads[0]?.pinnedAt).toBe(now);
+    expect(unsettled.threads[0]?.settledOverride).not.toBe("settled");
+  }),
+);
+
 it.effect("projects pin order key lifecycle", () =>
   Effect.gen(function* () {
     const now = "2026-01-01T00:00:00.000Z";
