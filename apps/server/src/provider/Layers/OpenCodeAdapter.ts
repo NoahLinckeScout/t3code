@@ -35,6 +35,7 @@ import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import { MCP_SERVER_NAME, mcpAttachmentOutcome } from "../openCodeMcpAttachment.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import {
   ProviderAdapterProcessError,
@@ -2804,6 +2805,26 @@ export function makeOpenCodeAdapter(
       );
     });
 
+    /** Makes a refused attachment visible. The token is never logged. */
+    const reportMcpAttachment = Effect.fn("OpenCodeAdapter.reportMcpAttachment")(function* (
+      threadId: ThreadId,
+      endpoint: string,
+      result: unknown,
+    ) {
+      const outcome = mcpAttachmentOutcome(result);
+      if (outcome.connected) {
+        yield* Effect.logDebug("Attached the t3-code MCP toolkit to an OpenCode session", {
+          threadId,
+          endpoint,
+        });
+        return;
+      }
+      yield* Effect.logWarning(
+        "OpenCode refused the t3-code MCP toolkit; this session's agent will not see any t3-code tools.",
+        { threadId, endpoint, status: outcome.status, detail: outcome.detail },
+      );
+    });
+
     const startSession: OpenCodeAdapterShape["startSession"] = Effect.fn("startSession")(
       function* (input) {
         const binaryPath = openCodeSettings.binaryPath;
@@ -2844,9 +2865,9 @@ export function makeOpenCodeAdapter(
                 ...(server.serverPassword ? { serverPassword: server.serverPassword } : {}),
               });
               if (mcpSession && !server.external) {
-                yield* runOpenCodeSdk("mcp.add", () =>
+                const added = yield* runOpenCodeSdk("mcp.add", () =>
                   client.mcp.add({
-                    name: "t3-code",
+                    name: MCP_SERVER_NAME,
                     config: {
                       type: "remote",
                       url: mcpSession.endpoint,
@@ -2856,6 +2877,14 @@ export function makeOpenCodeAdapter(
                       oauth: false,
                     },
                   }),
+                );
+                // OpenCode answers this with HTTP 200 whether or not it could
+                // reach the server, putting the outcome in the body.
+                yield* reportMcpAttachment(input.threadId, mcpSession.endpoint, added.data);
+              } else if (mcpSession === undefined) {
+                yield* Effect.logWarning(
+                  "OpenCode session started without the t3-code MCP toolkit: no credential was issued for this thread.",
+                  { threadId: input.threadId },
                 );
               }
               // Resume: re-adopt the session named by the durable cursor —

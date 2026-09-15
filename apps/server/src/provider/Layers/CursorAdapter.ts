@@ -1074,7 +1074,14 @@ export function makeCursorAdapter(
               ),
             );
 
-          yield* ctx.acp.drainEvents;
+          // stopSession interrupts the notification fiber that acknowledges
+          // the drain barrier. Race the fiber's death so a cancelled turn
+          // cannot hang waiting for an acknowledgment that will never come.
+          if (ctx.notificationFiber !== undefined) {
+            yield* Effect.raceFirst(ctx.acp.drainEvents, Fiber.await(ctx.notificationFiber));
+          } else {
+            yield* ctx.acp.drainEvents;
+          }
           const failure = ctx.assistantReply.failure;
           if (ctx.promptsInFlight === 1 && result.stopReason !== "cancelled" && failure) {
             return yield* new ProviderAdapterRequestError({
