@@ -156,6 +156,33 @@ const RECLAIM_OBSERVATION_DELAY_MILLIS = 200;
 const isAlreadyExists = (error: PlatformError.PlatformError): boolean =>
   error.reason._tag === "AlreadyExists";
 
+const isNotFound = (error: PlatformError.PlatformError): boolean => error.reason._tag === "NotFound";
+
+const reclaimGatePath = (lockPath: string): string => `${lockPath}.reclaim`;
+
+/**
+ * Serialize stale-lock takeover. Two reclaimers can both finish the last
+ * stale read, then both `remove` — the second deletes the first's fresh
+ * claim. An exclusive gate file makes exactly one reclaimer allowed to
+ * touch `server.lock`; everyone else backs off and retries the create.
+ */
+const takeReclaimGate = Effect.fn("serverSingleton.takeReclaimGate")(function* (lockPath: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const gatePath = reclaimGatePath(lockPath);
+  const existing = yield* fs.readFileString(gatePath).pipe(
+    Effect.catch((error) => (isNotFound(error) ? Effect.succeed(undefined) : Effect.fail(error))),
+  );
+  if (existing !== undefined) {
+    const gatePid = Number.parseInt(existing.trim(), 10);
+    if (processIsAlive(gatePid)) return false;
+    yield* fs.remove(gatePath, { force: true }).pipe(Effect.ignore);
+  }
+  return yield* fs.writeFileString(gatePath, `${process.pid}\n`, { flag: "wx" }).pipe(
+    Effect.as(true),
+    Effect.catch((error) => (isAlreadyExists(error) ? Effect.succeed(false) : Effect.fail(error))),
+  );
+});
+
 /**
  * A pre-lock server is live against this directory. Failure-phase marker rather
  * than an error: `serverRuntimeState.ts` already owns the file's decode-error
@@ -250,16 +277,53 @@ const claimLock = Effect.fn("serverSingleton.claimLock")(function* (input: {
       // here, not on a later manual retry. Bounded, so a lock another starter
       // keeps recreating (or a permissions wall keeps failing to remove for)
       // still surfaces as itself.
-      yield* fs.remove(input.lockPath, { force: true });
-      reclaimRefreshes = 0;
-      reclaimCycles += 1;
-      if (reclaimCycles >= MAX_RECLAIM_CYCLES) {
-        return new ServerLockUnavailableError({
-          lockPath: input.lockPath,
-          attempts: reclaimCycles,
-        });
+      const wonGate = yield* takeReclaimGate(input.lockPath);
+      if (!wonGate) {
+        reclaimRefreshes = 0;
+        reclaimCycles += 1;
+        if (reclaimCycles >= MAX_RECLAIM_CYCLES) {
+          return new ServerLockUnavailableError({
+            lockPath: input.lockPath,
+            attempts: reclaimCycles,
+          });
+        }
+        continue;
       }
-      continue;
+      const gatePath = reclaimGatePath(input.lockPath);
+      const takeover = yield* Effect.gen(function* () {
+        const holderAfterGate = yield* readHolder(input.lockPath);
+        if (holderAfterGate !== undefined && processIsAlive(holderAfterGate.pid)) {
+          return new ServerAlreadyRunningError({
+            stateDir: input.stateDir,
+            lockPath: input.lockPath,
+            holderPid: holderAfterGate.pid,
+            ...(holderAfterGate.port === undefined ? {} : { holderPort: holderAfterGate.port }),
+            holderStartedAt: holderAfterGate.startedAt,
+          });
+        }
+        yield* fs.remove(input.lockPath, { force: true });
+        const created = yield* fs.writeFileString(input.lockPath, payload, { flag: "wx" }).pipe(
+          Effect.as(true),
+          Effect.catch((error) =>
+            isAlreadyExists(error) ? Effect.succeed(false) : Effect.fail(error),
+          ),
+        );
+        return created ? undefined : "retry";
+      }).pipe(
+        Effect.ensuring(fs.remove(gatePath, { force: true }).pipe(Effect.ignore)),
+      );
+      if (takeover === "retry") {
+        reclaimRefreshes = 0;
+        reclaimCycles += 1;
+        if (reclaimCycles >= MAX_RECLAIM_CYCLES) {
+          return new ServerLockUnavailableError({
+            lockPath: input.lockPath,
+            attempts: reclaimCycles,
+          });
+        }
+        continue;
+      }
+      return takeover;
     }
 
     reclaimRefreshes += 1;

@@ -225,9 +225,11 @@ const RelayClientLive = Layer.unwrap(
 /**
  * Claims the data directory before anything binds a port or opens the database.
  *
- * Provided into `HttpServerLive` rather than merged alongside it so the ordering
- * is structural: the lock is a dependency of the thing it protects, and a second
- * server cannot reach a listening socket while another holds the directory.
+ * Provided into both `HttpServerLive` and `RuntimeDependenciesLive` (same layer
+ * identity, so one acquire) so the lock precedes the HTTP bind *and* SQLite
+ * open. Providing it only into the HTTP layer left persistence free to
+ * initialize in parallel and write `state.sqlite` before a second process
+ * refused.
  */
 const ServerSingletonLive = Layer.effectDiscard(
   Effect.gen(function* () {
@@ -565,6 +567,7 @@ const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
   Layer.provideMerge(RemoteOpenTargets.layer),
   Layer.provideMerge(ServerLifecycleEvents.layer),
   Layer.provide(NetService.layer),
+  Layer.provide(ServerSingletonLive),
 );
 
 const commandReadinessLayer = HttpRouter.middleware(
@@ -620,9 +623,22 @@ const makeServerLayer = Layer.unwrap(
 
     const httpListeningLayer = Layer.effectDiscard(
       Effect.gen(function* () {
-        yield* HttpServer.HttpServer;
+        const server = yield* HttpServer.HttpServer;
         const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
         yield* startup.markHttpListening;
+        const address = server.address;
+        if (typeof address === "string" || !("port" in address)) {
+          return;
+        }
+        // Stamp the port as soon as the socket is bound. Waiting until
+        // runtimeStateLayer's awaitActivation left a window where the server
+        // was listening but a second launch's refusal could not name the port.
+        yield* ServerSingleton.serverLockPath(config.stateDir).pipe(
+          Effect.flatMap((lockPath) =>
+            ServerSingleton.recordServerLockPort(lockPath, address.port),
+          ),
+          Effect.ignore,
+        );
       }),
     );
     const runtimeStateLayer = Layer.effectDiscard(
@@ -637,16 +653,6 @@ const makeServerLayer = Layer.unwrap(
           }
 
           const launcher = yield* ServiceLauncherClient.ServiceLauncherClient;
-
-          // Stamp the port onto the lock we already hold. It is only ever read
-          // by a *later* server's refusal message, which turns "something else
-          // is running" into an address the user can open.
-          yield* ServerSingleton.serverLockPath(config.stateDir).pipe(
-            Effect.flatMap((lockPath) =>
-              ServerSingleton.recordServerLockPort(lockPath, address.port),
-            ),
-            Effect.ignore,
-          );
 
           const state = yield* makePersistedServerRuntimeState({
             config,

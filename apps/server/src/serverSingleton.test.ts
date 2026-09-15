@@ -314,6 +314,46 @@ layer("serverSingleton", (it) => {
     }),
   );
 
+  it.effect("only one of two concurrent reclaimers acquires a stale directory", () =>
+    Effect.gen(function* () {
+      const stateDir = yield* makeStateDir();
+      const fs = yield* FileSystem.FileSystem;
+      const lockPath = yield* serverLockPath(stateDir);
+      yield* fs.writeFileString(lockPath, staleHolder(4194304));
+      const past = DateTime.toDateUtc(
+        DateTime.subtractDuration(yield* DateTime.now, Duration.minutes(1)),
+      );
+      yield* fs.utimes(lockPath, past, past);
+
+      // Two starters both pass the last stale read, then both used to
+      // `fs.remove` — the second deleted the first's new claim and both
+      // proceeded. The exclusive reclaim gate lets only one touch the path.
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const attempt = acquireServerSingleton(stateDir).pipe(
+            Effect.match({
+              onFailure: (error) => ({ ok: false as const, error }),
+              onSuccess: (held) => ({ ok: true as const, held }),
+            }),
+          );
+          // Shared scope keeps the winner's lock held until both fibers finish,
+          // otherwise the winner would release before the loser observed it.
+          const first = yield* Effect.forkChild(attempt);
+          const second = yield* Effect.forkChild(attempt);
+          const outcomes = [yield* Fiber.join(first), yield* Fiber.join(second)];
+          const wins = outcomes.filter((outcome) => outcome.ok);
+          const losses = outcomes.filter((outcome) => !outcome.ok);
+          assert.strictEqual(wins.length, 1);
+          assert.strictEqual(losses.length, 1);
+          const loss = losses[0];
+          if (loss !== undefined && !loss.ok) {
+            assert.strictEqual(loss.error._tag, "ServerAlreadyRunningError");
+          }
+        }),
+      );
+    }),
+  );
+
   it.effect("a partial metadata update is never readable as an empty owner", () =>
     Effect.gen(function* () {
       const stateDir = yield* makeStateDir();
