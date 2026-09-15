@@ -538,6 +538,7 @@ describe("delegation waker (real engine + sqlite)", () => {
         yield* store.insertPending({
           delegationId: DelegationId.make(delegationId),
           parentThreadId: PARENT_THREAD,
+          childThreadId: UNRELATED_THREAD,
           role: "research",
           providerInstanceId: ProviderInstanceId.make("opencode"),
           model: "self-hosted-glm/glm-5.3-flash",

@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -14,6 +14,7 @@ import { SqlitePersistenceMemory } from "../../../persistence/Layers/Sqlite.ts";
 import { OrchestrationActor } from "./actor.ts";
 import * as DelegationStoreLayer from "./DelegationStore.ts";
 import { DelegationStore } from "./DelegationStore.ts";
+import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { OrchestrationToolkitHandlersLive } from "./handlers.ts";
 import { OrchestrationRoles } from "./roles.ts";
 import {
@@ -36,6 +37,15 @@ const toolkitFailure = (failure: unknown): OrchestrationToolkitError => {
 
 const parentThreadId = ThreadId.make("thread-handler-parent");
 const orphanThreadId = ThreadId.make("thread-handler-orphan");
+
+const invocationFor = (threadId: ThreadId) => ({
+  environmentId: EnvironmentId.make("environment-handler-test"),
+  threadId,
+  providerSessionId: "provider-session-handler-test",
+  providerInstanceId: ProviderInstanceId.make("opencode"),
+  capabilities: new Set(["preview"] as const),
+  issuedAt: 1,
+});
 
 // Mirrors the real decider: `thread.settle` is refused while the session is
 // live, which is always true while a thread's own agent is calling a tool.
@@ -135,6 +145,7 @@ const callSpawn = (
         Stream.unwrap,
         Stream.run(Sink.last()),
         Effect.flatMap(Effect.fromOption),
+        Effect.provideService(OrchestrationActor, { threadId }),
         Effect.provideService(McpInvocationContext.McpInvocationContext, invocationFor(threadId)),
       );
   });
