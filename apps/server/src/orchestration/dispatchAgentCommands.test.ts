@@ -90,10 +90,21 @@ const ROLES_CONFIG_JSON = `{
   }
 }`;
 
+const SETTINGS_CATALOG_JSON = `{
+  "providerInstances": {
+    "claudeAgent": {
+      "driver": "claudeAgent",
+      "enabled": true,
+      "config": { "customModels": ["glm-5.3-flash-c8", "glm-5.3-flash"] }
+    }
+  }
+}`;
+
 const writeRolesFixture = Effect.fn("dispatchTest.writeRolesFixture")(function* () {
   const config = yield* ServerConfig;
   const fs = yield* FileSystem.FileSystem;
   yield* fs.writeFileString(`${config.stateDir}/orchestration-roles.json`, ROLES_CONFIG_JSON);
+  yield* fs.writeFileString(config.settingsPath, SETTINGS_CATALOG_JSON);
 });
 
 const seedParentThread = (scope: string) =>
@@ -309,6 +320,43 @@ describe("agent.* dispatch commands (real engine + sqlite)", () => {
   );
 
   it.effect(
+    "spawns a catalog model that is not a named role onto the child's real modelSelection",
+    () =>
+      Effect.gen(function* () {
+        yield* writeRolesFixture();
+        yield* seedParentThread("catalog-spawn");
+
+        const dispatchService = yield* ClientOrchestrationCommandDispatch;
+        const result = yield* dispatchService.dispatch(
+          spawnCommand({
+            role: "claudeAgent/glm-5.3-flash-c8",
+            objective: "Read the screenshot and name the vehicle",
+          }),
+        );
+        const spawnPayload = result.result as {
+          role: string;
+          model: string;
+          providerInstanceId: string;
+          childThreadId: string;
+        };
+        assert.strictEqual(spawnPayload.role, "claudeAgent/glm-5.3-flash-c8");
+        assert.strictEqual(spawnPayload.providerInstanceId, "claudeAgent");
+        assert.strictEqual(spawnPayload.model, "glm-5.3-flash-c8");
+
+        const sql = yield* SqlClient.SqlClient;
+        const childRows = yield* sql<DispatchRow>`
+          SELECT thread_id AS "threadId", title, model_selection_json AS "modelSelectionJson"
+          FROM projection_threads
+          WHERE thread_id = ${spawnPayload.childThreadId}
+        `;
+        assert.strictEqual(childRows.length, 1);
+        const childModelSelection = yield* decodeModelSelection(childRows[0]!.modelSelectionJson);
+        assert.strictEqual(childModelSelection.instanceId, "claudeAgent");
+        assert.strictEqual(childModelSelection.model, "glm-5.3-flash-c8");
+      }).pipe(Effect.provide(dispatchSystemLayer)),
+  );
+
+  it.effect(
     "refuses a second agent.spawn on a held resourceLease, including two concurrent dispatches",
     () =>
       Effect.gen(function* () {
@@ -396,11 +444,9 @@ describe("agent.* dispatch commands (real engine + sqlite)", () => {
       // Both callers run at once; the loser must join the winner's execution
       // instead of observing an empty receipt table and running the handler
       // again.
-      const outcomes = yield* Effect.forEach(
-        [1, 2],
-        () => dispatchService.dispatch(command),
-        { concurrency: 2 },
-      );
+      const outcomes = yield* Effect.forEach([1, 2], () => dispatchService.dispatch(command), {
+        concurrency: 2,
+      });
       assert.deepStrictEqual(outcomes[0], outcomes[1]);
       const store = yield* DelegationStore;
       const delegations = yield* store.listByParent(PARENT_THREAD);
