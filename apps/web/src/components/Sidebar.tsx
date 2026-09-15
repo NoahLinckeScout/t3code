@@ -161,6 +161,7 @@ import {
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
   planSidebarThreadDrop,
+  reconcileSidebarThreadDrop,
   reduceSidebarProjectScopeMenuState,
   resolveAdjacentThreadId,
   resolveSidebarDropTarget,
@@ -171,6 +172,7 @@ import {
   shouldCreateNewThreadInCurrentProject,
   shouldRecedeSidebarThread,
   resolveWorkingStartedAt,
+  SIDEBAR_DROP_LAND_GRACE_MS,
   sidebarListItemId,
   sidebarMarkerId,
   sortLogicalProjectsForSidebar,
@@ -182,6 +184,7 @@ import {
   useThreadJumpHintVisibility,
   type SidebarListItem,
   type SidebarListMarker,
+  type SidebarOptimisticDrop,
   type SidebarSection,
 } from "./Sidebar.logic";
 import { resolveLocalCheckoutBranchMismatch } from "./BranchToolbar.logic";
@@ -2493,20 +2496,7 @@ export default function Sidebar() {
   // Keep a dropped row at its destination while its server applies the
   // lifecycle command and any order-key writes. The next pickup waits for
   // this hold so a second drop cannot replace an unconfirmed placement.
-  const [optimisticDrop, setOptimisticDrop] = useState<{
-    readonly key: string;
-    readonly sourceSection: SidebarSection;
-    readonly section: "pinned" | "active" | "settled";
-    readonly occurredAt: string;
-    readonly clearsSnooze: boolean;
-    /** Full destination order for pinned and active drops. */
-    readonly order: readonly string[] | null;
-    /** Destination order keys before the drop, to recognize concurrent writes. */
-    readonly keysAtDrop: ReadonlyMap<string, string | null>;
-    /** The keys this drop writes (one per planned assignment). The
-        override holds until all of them appear in canonical state. */
-    readonly assignedKeys: ReadonlyMap<string, string>;
-  } | null>(null);
+  const [optimisticDrop, setOptimisticDrop] = useState<SidebarOptimisticDrop | null>(null);
   const {
     pinnedThreads,
     draggableThreadKeys,
@@ -3181,67 +3171,45 @@ export default function Sidebar() {
       ]),
     );
     const thread = canonicalByKey.get(optimisticDrop.key);
-    if (thread === undefined || thread.archivedAt !== null) {
-      setOptimisticDrop(null);
-      return;
-    }
-    const canonicalSection = effectiveSnoozed(thread, { now: new Date().toISOString() })
-      ? "snoozed"
-      : thread.settledOverride === "settled"
-        ? "settled"
-        : thread.pinnedAt != null
-          ? "pinned"
-          : "active";
+    const canonicalSection =
+      thread === undefined
+        ? "active"
+        : effectiveSnoozed(thread, { now: new Date().toISOString() })
+          ? "snoozed"
+          : thread.settledOverride === "settled"
+            ? "settled"
+            : thread.pinnedAt != null
+              ? "pinned"
+              : "active";
     if (
-      canonicalSection !== optimisticDrop.sourceSection &&
-      canonicalSection !== optimisticDrop.section
+      reconcileSidebarThreadDrop({
+        drop: optimisticDrop,
+        canonicalByKey,
+        canonicalSection,
+        destinationKeys: optimisticDrop.section === "pinned" ? pinnedKeys : activeKeys,
+        now: new Date().toISOString(),
+      }) === "clear"
     ) {
-      setOptimisticDrop(null);
-      return;
-    }
-    if (optimisticDrop.order === null) {
-      // Settle emits unsnooze for snoozed rows but no longer unpins: a pin
-      // survives the settle (it re-emerges on unsettle). Wait for the
-      // section move — and the snooze clear where one is pending — before
-      // releasing the projected fields and sort timestamps.
-      if (
-        canonicalSection === optimisticDrop.section &&
-        (!optimisticDrop.clearsSnooze || thread.snoozedUntil == null)
-      ) {
-        setOptimisticDrop(null);
-      }
-      return;
-    }
-    if (canonicalSection !== optimisticDrop.section) return;
-    if (optimisticDrop.clearsSnooze && thread.snoozedUntil != null) return;
-    const destinationKeys = optimisticDrop.section === "pinned" ? pinnedKeys : activeKeys;
-    const canonicalDestination = destinationKeys.flatMap((key) => {
-      const canonical = canonicalByKey.get(key);
-      return canonical === undefined ? [] : [canonical];
-    });
-    const keyByThread = new Map(
-      canonicalDestination.map((thread) => [
-        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-        (optimisticDrop.section === "pinned" ? thread.pinOrderKey : thread.activeOrderKey) ?? null,
-      ]),
-    );
-    const heldOrder = optimisticDrop.order;
-    const heldKeys = new Set(heldOrder);
-    const membershipChanged =
-      destinationKeys.length !== heldOrder.length ||
-      destinationKeys.some((key) => !heldKeys.has(key));
-    const foreignKeyLanded = destinationKeys.some((threadKey) => {
-      const currentKey = keyByThread.get(threadKey) ?? null;
-      if (currentKey === (optimisticDrop.keysAtDrop.get(threadKey) ?? null)) return false;
-      return currentKey !== optimisticDrop.assignedKeys.get(threadKey);
-    });
-    const allAssignmentsLanded = [...optimisticDrop.assignedKeys].every(
-      ([threadKey, orderKey]) => keyByThread.get(threadKey) === orderKey,
-    );
-    if (membershipChanged || foreignKeyLanded || allAssignmentsLanded) {
       setOptimisticDrop(null);
     }
   }, [activeKeys, optimisticDrop, pinnedKeys, threads]);
+  // A dispatch that never settles (hung transport, a server lost mid-request)
+  // leaves no failure to react to; without this timer its preview would hold
+  // a phantom placement — a pin that never landed, rendered as pinned — until
+  // reload. After the landing grace the row returns to canonical data, and a
+  // genuinely-landed write reasserts itself via its arriving event.
+  useEffect(() => {
+    if (optimisticDrop === null) return;
+    const remainingMs =
+      SIDEBAR_DROP_LAND_GRACE_MS - (Date.now() - Date.parse(optimisticDrop.occurredAt));
+    const timer = setTimeout(
+      () => {
+        setOptimisticDrop((current) => (current === optimisticDrop ? null : current));
+      },
+      Math.max(0, remainingMs),
+    );
+    return () => clearTimeout(timer);
+  }, [optimisticDrop]);
   const attemptPin = useCallback(
     (threadRef: ScopedThreadRef) => {
       void (async () => {
