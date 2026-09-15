@@ -1,4 +1,4 @@
-import { assert, describe, it } from "@effect/vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { MCP_SERVER_NAME, mcpAttachmentOutcome } from "./openCodeMcpAttachment.ts";
 
@@ -9,8 +9,8 @@ import { MCP_SERVER_NAME, mcpAttachmentOutcome } from "./openCodeMcpAttachment.t
 describe("mcpAttachmentOutcome", () => {
   it("accepts a connected server", () => {
     const outcome = mcpAttachmentOutcome({ [MCP_SERVER_NAME]: { status: "connected" } });
-    assert.isTrue(outcome.connected);
-    assert.strictEqual(outcome.status, "connected");
+    expect(outcome.connected).toBe(true);
+    expect(outcome.status).toBe("connected");
   });
 
   it("reports the auth rejection that a bad credential produces", () => {
@@ -18,9 +18,9 @@ describe("mcpAttachmentOutcome", () => {
     const outcome = mcpAttachmentOutcome({
       [MCP_SERVER_NAME]: { status: "failed", error: "SSE error: Non-200 status code (401)" },
     });
-    assert.isFalse(outcome.connected);
-    assert.strictEqual(outcome.status, "failed");
-    assert.include(outcome.detail, "401");
+    expect(outcome.connected).toBe(false);
+    expect(outcome.status).toBe("failed");
+    expect(outcome.detail).toContain("401");
   });
 
   it("reports an unreachable endpoint", () => {
@@ -30,27 +30,27 @@ describe("mcpAttachmentOutcome", () => {
         error: "SSE error: Unable to connect. Is the computer able to access the url?",
       },
     });
-    assert.isFalse(outcome.connected);
-    assert.include(outcome.detail, "Unable to connect");
+    expect(outcome.connected).toBe(false);
+    expect(outcome.detail).toContain("Unable to connect");
   });
 
   it("treats a payload that never mentions our server as a failure", () => {
     // Silence is the dangerous case: it is what "success" looked like before.
     const outcome = mcpAttachmentOutcome({ "some-other-server": { status: "connected" } });
-    assert.isFalse(outcome.connected);
-    assert.strictEqual(outcome.status, "absent");
+    expect(outcome.connected).toBe(false);
+    expect(outcome.status).toBe("absent");
   });
 
   it("does not mistake a missing or malformed body for success", () => {
     for (const payload of [undefined, null, "", 0, [], { [MCP_SERVER_NAME]: null }]) {
-      assert.isFalse(mcpAttachmentOutcome(payload).connected, `payload ${String(payload)}`);
+      expect(mcpAttachmentOutcome(payload).connected).toBe(false);
     }
   });
 
   it("surfaces an unknown status rather than assuming it is fine", () => {
     const outcome = mcpAttachmentOutcome({ [MCP_SERVER_NAME]: { status: "pending" } });
-    assert.isFalse(outcome.connected);
-    assert.strictEqual(outcome.status, "pending");
-    assert.strictEqual(outcome.detail, "(none reported)");
+    expect(outcome.connected).toBe(false);
+    expect(outcome.status).toBe("pending");
+    expect(outcome.detail).toBe("(none reported)");
   });
 });

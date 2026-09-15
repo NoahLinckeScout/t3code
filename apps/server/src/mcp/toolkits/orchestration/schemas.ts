@@ -294,7 +294,7 @@ export const OrchestrationToolkitErrorReason = Schema.Literals([
 ]);
 export type OrchestrationToolkitErrorReason = typeof OrchestrationToolkitErrorReason.Type;
 
-export class OrchestrationToolkitError extends Schema.TaggedErrorClass<OrchestrationToolkitError>()(
+export class OrchestrationToolkitError extends Schema.TaggedError<OrchestrationToolkitError>()(
   "OrchestrationToolkitError",
   {
     reason: OrchestrationToolkitErrorReason,

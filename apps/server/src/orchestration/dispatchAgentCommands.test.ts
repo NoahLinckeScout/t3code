@@ -396,11 +396,9 @@ describe("agent.* dispatch commands (real engine + sqlite)", () => {
       // Both callers run at once; the loser must join the winner's execution
       // instead of observing an empty receipt table and running the handler
       // again.
-      const outcomes = yield* Effect.forEach(
-        [1, 2],
-        () => dispatchService.dispatch(command),
-        { concurrency: 2 },
-      );
+      const outcomes = yield* Effect.forEach([1, 2], () => dispatchService.dispatch(command), {
+        concurrency: 2,
+      });
       assert.deepStrictEqual(outcomes[0], outcomes[1]);
       const store = yield* DelegationStore;
       const delegations = yield* store.listByParent(PARENT_THREAD);
@@ -538,6 +536,7 @@ describe("delegation waker (real engine + sqlite)", () => {
         yield* store.insertPending({
           delegationId: DelegationId.make(delegationId),
           parentThreadId: PARENT_THREAD,
+          childThreadId: UNRELATED_THREAD,
           role: "research",
           providerInstanceId: ProviderInstanceId.make("opencode"),
           model: "self-hosted-glm/glm-5.3-flash",

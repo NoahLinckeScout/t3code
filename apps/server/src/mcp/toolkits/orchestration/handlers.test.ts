@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ThreadId } from "@t3tools/contracts";
+import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -91,15 +91,13 @@ const handoff = (overrides: Partial<DelegationHandoff> = {}): DelegationHandoff 
  * declare has to resolve here, so this is what proves the registration wiring
  * works rather than merely typechecking.
  */
-const layer = it.layer(
-  OrchestrationToolkitHandlersLive.pipe(
-    Layer.provideMerge(
-      Layer.mergeAll(
-        DelegationStoreLayer.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
-        engineMock,
-        rolesMock,
-        NodeServices.layer,
-      ),
+const handlersLayer = OrchestrationToolkitHandlersLive.pipe(
+  Layer.provideMerge(
+    Layer.mergeAll(
+      DelegationStoreLayer.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+      engineMock,
+      rolesMock,
+      NodeServices.layer,
     ),
   ),
 );
@@ -135,7 +133,7 @@ const callSpawn = (
         Stream.unwrap,
         Stream.run(Sink.last()),
         Effect.flatMap(Effect.fromOption),
-        Effect.provideService(McpInvocationContext.McpInvocationContext, invocationFor(threadId)),
+        Effect.provideService(OrchestrationActor, { threadId }),
       );
   });
 
@@ -179,7 +177,7 @@ const startDelegation = (scope: string, childThreadId: ThreadId) =>
     return delegationId;
   });
 
-layer("orchestration handlers", (it) => {
+it.layer(handlersLayer)("orchestration handlers", (it) => {
   it.effect("refuses a handoff from a thread that was never delegated to", () =>
     Effect.gen(function* () {
       const failure = yield* callHandoff(orphanThreadId, handoff()).pipe(Effect.flip);
@@ -254,14 +252,12 @@ layer("orchestration handlers", (it) => {
       yield* ensureParentProjection;
 
       const result = decodeSpawnResult(
-        (
-          yield* callSpawn(parentThreadId, {
-            role: "implementer",
-            objective: "Rebuild the projection",
-            judgment: "Whether a rebuild or a targeted patch is correct",
-            idempotencyKey: "spawn-once",
-          })
-        ).encodedResult,
+        (yield* callSpawn(parentThreadId, {
+          role: "implementer",
+          objective: "Rebuild the projection",
+          judgment: "Whether a rebuild or a targeted patch is correct",
+          idempotencyKey: "spawn-once",
+        })).encodedResult,
       );
       assert.strictEqual(result.state, "running");
       assert.strictEqual(result.replayed, false);
@@ -297,14 +293,12 @@ layer("orchestration handlers", (it) => {
       });
 
       const result = decodeSpawnResult(
-        (
-          yield* callSpawn(parentThreadId, {
-            role: "implementer",
-            objective: "Resume me",
-            judgment: "Whether the resume reuses the recorded child",
-            idempotencyKey: "resume-key",
-          })
-        ).encodedResult,
+        (yield* callSpawn(parentThreadId, {
+          role: "implementer",
+          objective: "Resume me",
+          judgment: "Whether the resume reuses the recorded child",
+          idempotencyKey: "resume-key",
+        })).encodedResult,
       );
 
       // The resume reuses the recorded delegation and child instead of minting

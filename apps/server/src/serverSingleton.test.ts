@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
-import { TestClock } from "effect/testing";
+import * as TestClock from "effect/testing/TestClock";
 
 import {
   SERVER_LOCK_FILENAME,
@@ -15,8 +15,6 @@ import {
   serverLockPath,
 } from "./serverSingleton.ts";
 
-const layer = it.layer(NodeServices.layer);
-
 const makeStateDir = Effect.fn("test.makeStateDir")(function* () {
   const fs = yield* FileSystem.FileSystem;
   return yield* fs.makeTempDirectory({ prefix: "t3-singleton-" });
@@ -26,7 +24,7 @@ const makeStateDir = Effect.fn("test.makeStateDir")(function* () {
 const staleHolder = (pid: number) =>
   `{"version":1,"pid":${pid},"startedAt":"2026-01-01T00:00:00.000Z"}`;
 
-layer("serverSingleton", (it) => {
+it.layer(NodeServices.layer)("serverSingleton", (it) => {
   it.effect("claims a free directory and releases it on scope exit", () =>
     Effect.gen(function* () {
       const stateDir = yield* makeStateDir();

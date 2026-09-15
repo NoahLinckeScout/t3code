@@ -17,7 +17,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
-export class SelfNotBoundError extends Schema.TaggedErrorClass<SelfNotBoundError>()(
+export class SelfNotBoundError extends Schema.TaggedError<SelfNotBoundError>()(
   "SelfNotBoundError",
   {
     detail: Schema.String,

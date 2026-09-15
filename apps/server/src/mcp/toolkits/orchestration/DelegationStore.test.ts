@@ -10,9 +10,7 @@ import { DelegationStore } from "./DelegationStore.ts";
 import { DelegationId } from "./schemas.ts";
 
 // One database is shared across the block, so every case names its own rows.
-const layer = it.layer(
-  DelegationStoreLayer.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
-);
+const storeLayer = DelegationStoreLayer.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory));
 
 const ids = (scope: string) => ({
   first: DelegationId.make(`dlg-${scope}-1`),
@@ -40,7 +38,7 @@ const pending = (
   ...overrides,
 });
 
-layer("DelegationStore", (it) => {
+it.layer(storeLayer)("DelegationStore", (it) => {
   it.effect("round-trips a delegation from pending through running to terminal", () =>
     Effect.gen(function* () {
       const store = yield* DelegationStore;
@@ -50,7 +48,10 @@ layer("DelegationStore", (it) => {
       const created = yield* store.findById(id.first);
       assert.strictEqual(created?.state, "pending");
       // Named at insert time, so a crash before dispatch leaves a resumable row.
-      assert.strictEqual(created?.childThreadId, pending({ delegationId: id.first, parentThreadId: id.parent }).childThreadId);
+      assert.strictEqual(
+        created?.childThreadId,
+        pending({ delegationId: id.first, parentThreadId: id.parent }).childThreadId,
+      );
 
       yield* store.markRunning(id.first, id.child, 42);
       const running = yield* store.findByChildThread(id.child);
