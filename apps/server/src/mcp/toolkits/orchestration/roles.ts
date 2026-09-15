@@ -18,9 +18,12 @@
  * disabled, or does not list the model.
  */
 import {
+  defaultInstanceIdForDriver,
+  ProviderDriverKind,
   ProviderInstanceId,
   ProviderInteractionMode,
   ProviderOptionSelections,
+  resolveProviderInstanceEnabled,
   RuntimeMode,
 } from "@t3tools/contracts";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
@@ -127,44 +130,114 @@ const optionsFromCustomModel = (
   return selections.length > 0 ? selections : undefined;
 };
 
-const readEnvelopeEnabled = (value: unknown): boolean | undefined => {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+/**
+ * Bare `customModels` slugs have no capabilities. OpenCode still needs an
+ * agent selection to route (`OpenCodeProvider` defaults `agent=build` and
+ * `variant=medium`); omitting those is "no choice", not the provider default.
+ */
+const OPENCODE_BARE_SLUG_OPTIONS: ProviderOptionSelections = [
+  { id: "variant", value: "medium" },
+  { id: "agent", value: "build" },
+];
+
+const optionsForCatalogEntry = (
+  driver: string,
+  capabilities: ReturnType<typeof readCustomModelEntries>[number]["capabilities"],
+): ProviderOptionSelections | undefined =>
+  optionsFromCustomModel(capabilities) ??
+  (driver === "opencode" ? OPENCODE_BARE_SLUG_OPTIONS : undefined);
+
+const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+  value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+
+const legacyCustomModelsForDriver = (raw: Record<string, unknown>, driver: string): unknown => {
+  const providers = asRecord(raw.providers);
+  const legacy = asRecord(providers?.[driver]);
+  return legacy?.customModels;
+};
+
+const customModelsForInstance = (
+  raw: Record<string, unknown>,
+  instanceId: string,
+  driver: string,
+  config: unknown,
+): unknown => {
+  const configRecord = asRecord(config);
+  if (Array.isArray(configRecord?.customModels)) {
+    return configRecord.customModels;
+  }
+  try {
+    if (instanceId === defaultInstanceIdForDriver(ProviderDriverKind.make(driver))) {
+      return legacyCustomModelsForDriver(raw, driver);
+    }
+  } catch {
     return undefined;
   }
-  const enabled = (value as { readonly enabled?: unknown }).enabled;
-  return typeof enabled === "boolean" ? enabled : undefined;
+  return undefined;
 };
 
 export const catalogInstancesFromSettings = (raw: unknown): ReadonlyArray<CatalogInstance> => {
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+  const root = asRecord(raw);
+  if (root === undefined) {
     return [];
   }
-  const instances = (raw as { readonly providerInstances?: unknown }).providerInstances;
-  if (instances === null || typeof instances !== "object" || Array.isArray(instances)) {
-    return [];
-  }
+  const instances = asRecord(root.providerInstances) ?? {};
   const catalog: CatalogInstance[] = [];
-  for (const [instanceId, envelope] of Object.entries(instances)) {
-    if (envelope === null || typeof envelope !== "object" || Array.isArray(envelope)) {
-      continue;
+  const seen = new Set<string>();
+
+  const pushInstance = (instanceId: string, envelope: unknown) => {
+    const record = asRecord(envelope);
+    if (record === undefined || typeof record.driver !== "string") {
+      return;
     }
-    const config = (envelope as { readonly config?: unknown }).config;
-    const configEnabled = readEnvelopeEnabled(config);
-    const envelopeEnabled = readEnvelopeEnabled(envelope);
-    const enabled = envelopeEnabled !== false && configEnabled !== false;
-    const customModels =
-      config !== null && typeof config === "object" && !Array.isArray(config)
-        ? (config as { readonly customModels?: unknown }).customModels
-        : undefined;
+    const driver = record.driver;
+    let enabled = false;
+    try {
+      enabled = resolveProviderInstanceEnabled({
+        driver: ProviderDriverKind.make(driver),
+        enabled: typeof record.enabled === "boolean" ? record.enabled : undefined,
+        config: record.config,
+      });
+    } catch {
+      enabled = record.enabled !== false;
+    }
     catalog.push({
       instanceId,
       enabled,
-      models: readCustomModelEntries(customModels).map((entry) => ({
+      models: readCustomModelEntries(
+        customModelsForInstance(root, instanceId, driver, record.config),
+      ).map((entry) => ({
         slug: entry.slug,
-        options: optionsFromCustomModel(entry.capabilities),
+        options: optionsForCatalogEntry(driver, entry.capabilities),
       })),
     });
+    seen.add(instanceId);
+  };
+
+  for (const [instanceId, envelope] of Object.entries(instances)) {
+    pushInstance(instanceId, envelope);
   }
+
+  const providers = asRecord(root.providers) ?? {};
+  for (const [driver, legacy] of Object.entries(providers)) {
+    let defaultId: string;
+    try {
+      defaultId = defaultInstanceIdForDriver(ProviderDriverKind.make(driver));
+    } catch {
+      continue;
+    }
+    if (seen.has(defaultId)) {
+      continue;
+    }
+    const models = readCustomModelEntries(asRecord(legacy)?.customModels);
+    if (models.length === 0) {
+      continue;
+    }
+    pushInstance(defaultId, { driver, config: asRecord(legacy) ?? {} });
+  }
+
   return catalog;
 };
 

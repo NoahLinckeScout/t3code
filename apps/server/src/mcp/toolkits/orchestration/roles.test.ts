@@ -106,6 +106,49 @@ describe("catalogInstancesFromSettings", () => {
     const codex = catalog.find((instance) => instance.instanceId === "codex");
     assert.strictEqual(codex?.enabled, false);
   });
+
+  it("falls back to legacy providers.<driver>.customModels for a default instance", () => {
+    const catalog = catalogInstancesFromSettings({
+      providers: { claudeAgent: { customModels: ["legacy-flash"] } },
+    });
+    const claude = catalog.find((instance) => instance.instanceId === "claudeAgent");
+    assert.isTrue(claude?.enabled);
+    assert.deepStrictEqual(
+      claude?.models.map((model) => model.slug),
+      ["legacy-flash"],
+    );
+  });
+
+  it("applies the driver's default enabled flag when both flags are omitted", () => {
+    const catalog = catalogInstancesFromSettings({
+      providerInstances: {
+        grok: { driver: "grok", config: { customModels: ["grok-build"] } },
+        claudeAgent: { driver: "claudeAgent", config: { customModels: ["glm-5.3-flash"] } },
+      },
+    });
+    assert.strictEqual(catalog.find((instance) => instance.instanceId === "grok")?.enabled, false);
+    assert.strictEqual(
+      catalog.find((instance) => instance.instanceId === "claudeAgent")?.enabled,
+      true,
+    );
+  });
+
+  it("fills OpenCode routing options for a bare custom-model slug", () => {
+    const catalog = catalogInstancesFromSettings({
+      providerInstances: {
+        opencode: {
+          driver: "opencode",
+          enabled: true,
+          config: { customModels: ["self-hosted-glm53/glm-5.3-flash"] },
+        },
+      },
+    });
+    const opencode = catalog.find((instance) => instance.instanceId === "opencode");
+    assert.deepStrictEqual(opencode?.models[0]?.options, [
+      { id: "variant", value: "medium" },
+      { id: "agent", value: "build" },
+    ]);
+  });
 });
 
 describe("OrchestrationRoles catalog fallback", () => {
