@@ -175,12 +175,38 @@ const takeReclaimGate = Effect.fn("serverSingleton.takeReclaimGate")(function* (
   if (existing !== undefined) {
     const gatePid = Number.parseInt(existing.trim(), 10);
     if (processIsAlive(gatePid)) return false;
-    yield* fs.remove(gatePath, { force: true }).pipe(Effect.ignore);
+    // Rename, do not unlink-by-name: two reclaimers that both saw a dead
+    // gate used to `remove` then `wx`, and the second deleted the first's
+    // fresh gate. Only one rename of the dead inode can succeed.
+    const deadPath = `${gatePath}.dead.${process.pid}`;
+    const renamed = yield* fs.rename(gatePath, deadPath).pipe(
+      Effect.as(true),
+      Effect.catch((error) => (isNotFound(error) ? Effect.succeed(false) : Effect.fail(error))),
+    );
+    if (renamed) {
+      yield* fs.remove(deadPath, { force: true }).pipe(Effect.ignore);
+    } else {
+      return false;
+    }
   }
   return yield* fs.writeFileString(gatePath, `${process.pid}\n`, { flag: "wx" }).pipe(
     Effect.as(true),
     Effect.catch((error) => (isAlreadyExists(error) ? Effect.succeed(false) : Effect.fail(error))),
   );
+});
+
+const lockIsOlderThanGrace = Effect.fn("serverSingleton.lockIsOlderThanGrace")(function* (
+  lockPath: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const info = yield* fs.stat(lockPath).pipe(
+    Effect.catch((error) => (isNotFound(error) ? Effect.succeed(undefined) : Effect.fail(error))),
+  );
+  if (info === undefined) return false;
+  const mtime = Option.getOrUndefined(info.mtime);
+  if (mtime === undefined) return false;
+  const now = yield* DateTime.now;
+  return DateTime.toEpochMillis(now) - mtime.getTime() >= RECLAIM_OBSERVATION_DELAY_MILLIS;
 });
 
 /**
@@ -291,6 +317,16 @@ const claimLock = Effect.fn("serverSingleton.claimLock")(function* (input: {
       }
       const gatePath = reclaimGatePath(input.lockPath);
       const takeover = yield* Effect.gen(function* () {
+        const existsAfterGate = yield* fs.exists(input.lockPath);
+        if (!existsAfterGate) {
+          const created = yield* fs.writeFileString(input.lockPath, payload, { flag: "wx" }).pipe(
+            Effect.as(true),
+            Effect.catch((error) =>
+              isAlreadyExists(error) ? Effect.succeed(false) : Effect.fail(error),
+            ),
+          );
+          return created ? undefined : "retry";
+        }
         const holderAfterGate = yield* readHolder(input.lockPath);
         if (holderAfterGate !== undefined && processIsAlive(holderAfterGate.pid)) {
           return new ServerAlreadyRunningError({
@@ -300,6 +336,13 @@ const claimLock = Effect.fn("serverSingleton.claimLock")(function* (input: {
             ...(holderAfterGate.port === undefined ? {} : { holderPort: holderAfterGate.port }),
             holderStartedAt: holderAfterGate.startedAt,
           });
+        }
+        // An empty or half-written lock may be a creator still inside
+        // writeFileString. Observation rounds are scheduler yields, not
+        // elapsed time, so require a real mtime grace and re-check it
+        // immediately before unlink.
+        if (holderAfterGate === undefined && !(yield* lockIsOlderThanGrace(input.lockPath))) {
+          return "retry";
         }
         yield* fs.remove(input.lockPath, { force: true });
         const created = yield* fs.writeFileString(input.lockPath, payload, { flag: "wx" }).pipe(
@@ -327,6 +370,11 @@ const claimLock = Effect.fn("serverSingleton.claimLock")(function* (input: {
     }
 
     reclaimRefreshes += 1;
+    // Do not refresh an undecodable lock: that file may still be mid-write,
+    // and bumping its mtime would hide the grace period below.
+    if (holder === undefined) {
+      continue;
+    }
     const now = yield* DateTime.now;
     // NotFound-tolerant: a shutdown mid-release can drop the file between our
     // read and our refresh, and the starter that released it is nobody's live

@@ -354,6 +354,41 @@ layer("serverSingleton", (it) => {
     }),
   );
 
+  it.effect("only one reclaimer wins when a dead reclaim gate is left behind", () =>
+    Effect.gen(function* () {
+      const stateDir = yield* makeStateDir();
+      const fs = yield* FileSystem.FileSystem;
+      const lockPath = yield* serverLockPath(stateDir);
+      yield* fs.writeFileString(lockPath, staleHolder(4194304));
+      yield* fs.writeFileString(`${lockPath}.reclaim`, "4194304\n");
+      const past = DateTime.toDateUtc(
+        DateTime.subtractDuration(yield* DateTime.now, Duration.minutes(1)),
+      );
+      yield* fs.utimes(lockPath, past, past);
+
+      // Before: both reclaimers read the dead gate, both unlinked it by
+      // pathname, both wx-created, and both proceeded to delete each
+      // other's live lock. Rename of the dead inode serializes them.
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const attempt = acquireServerSingleton(stateDir).pipe(
+            Effect.match({
+              onFailure: (error) => ({ ok: false as const, error }),
+              onSuccess: (held) => ({ ok: true as const, held }),
+            }),
+          );
+          const first = yield* Effect.forkChild(attempt);
+          const second = yield* Effect.forkChild(attempt);
+          const outcomes = [yield* Fiber.join(first), yield* Fiber.join(second)];
+          const wins = outcomes.filter((outcome) => outcome.ok);
+          const losses = outcomes.filter((outcome) => !outcome.ok);
+          assert.strictEqual(wins.length, 1);
+          assert.strictEqual(losses.length, 1);
+        }),
+      );
+    }),
+  );
+
   it.effect("a partial metadata update is never readable as an empty owner", () =>
     Effect.gen(function* () {
       const stateDir = yield* makeStateDir();
