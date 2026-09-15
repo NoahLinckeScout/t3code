@@ -64,9 +64,10 @@ function isAcpTaskToolCall(toolCall: AcpToolCallState): boolean {
     typeof rawInput === "object" &&
     rawInput !== null &&
     "_toolName" in rawInput &&
-    typeof rawInput._toolName === "string"
+    typeof rawInput._toolName === "string" &&
+    rawInput._toolName.trim().toLowerCase() === "task"
   ) {
-    return rawInput._toolName.trim().toLowerCase() === "task";
+    return true;
   }
   return typeof toolCall.title === "string" && /^task:/i.test(toolCall.title.trim());
 }

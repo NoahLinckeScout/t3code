@@ -268,6 +268,13 @@ describe("AcpCoreRuntimeEvents", () => {
         status: "inProgress" as const,
         data: { toolCallId: "toolu_task_3", kind: "other", rawInput: { _toolName: "Task" } },
       },
+      {
+        toolCallId: "toolu_task_4",
+        kind: "other",
+        status: "completed" as const,
+        title: "Task: Subagent task",
+        data: { toolCallId: "toolu_task_4", kind: "other", rawInput: { _toolName: "mcp__x" } },
+      },
     ]) {
       expect(
         makeAcpToolCallEvent({
