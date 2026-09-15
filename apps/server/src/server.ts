@@ -516,7 +516,8 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // reads live delegations through the same sqlite-backed store the MCP
   // toolkit uses; merged with persistence so both build on one SqlClient.
   // Both read a user-owned file out of the state directory and stream changes
-  // to clients; neither depends on the other.
+  // to clients; neither depends on the other. Delegation store shares the
+  // sqlite client so the wake reactor and MCP toolkit see one MemoMap.
   Layer.provideMerge(
     Layer.mergeAll(
       Keybindings.layer,

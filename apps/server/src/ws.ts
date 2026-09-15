@@ -515,9 +515,9 @@ const makeWsRpcLayer = (
               Effect.orElseSucceed(() => null),
             );
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
+      const threadDeletionReactor = yield* ThreadDeletionReactor;
       const clientCommandDispatch =
         yield* ClientOrchestrationCommandDispatchModule.ClientOrchestrationCommandDispatch;
-      const threadDeletionReactor = yield* ThreadDeletionReactor;
       const analytics = yield* AnalyticsService.AnalyticsService;
       // Every command dispatched on this connection carries the connecting
       // client's origin, including server-generated bootstrap sub-commands:
@@ -1733,12 +1733,12 @@ const makeWsRpcLayer = (
               clientCommandDispatch
                 .dispatch(normalizedCommand, hasClientOrigin ? { origin: clientOrigin } : undefined)
                 .pipe(
-                  Effect.tap(({ sequence }) =>
+                  Effect.tap((result) =>
                     // Returning from thread.create is the handoff point at which
                     // clients may start resources for the new incarnation. Use
                     // its event sequence as the exact deletion-cleanup fence.
-                    normalizedCommand.type === "thread.create"
-                      ? threadDeletionReactor.drainThrough(sequence)
+                    normalizedCommand.type === "thread.create" && "sequence" in result
+                      ? threadDeletionReactor.drainThrough(result.sequence)
                       : Effect.void,
                   ),
                   Effect.mapError((cause) =>
