@@ -69,6 +69,34 @@ export const ProjectionTurnById = Schema.Struct({
 });
 export type ProjectionTurnById = typeof ProjectionTurnById.Type;
 
+/**
+ * A turn start that has been accepted and **not yet observed running**.
+ *
+ * This is not a work queue, and the difference has already caused one defect.
+ * The row is created for every accepted `thread.turn-start-requested`,
+ * including the one that immediately becomes the running turn, and it is
+ * removed only when the session goes `running` with an `activeTurnId` (the
+ * turn genuinely starting) or when the session reaches a terminal status.
+ *
+ * So its presence conflates two states that look identical from here:
+ *
+ * 1. the message was never sent to a provider -- genuinely queued work; and
+ * 2. the message **was** sent and the provider never reported the turn running
+ *    -- the `turn state=MISSING` state, which we have seen in production.
+ *
+ * Nothing in the row distinguishes them, and there is no "thread is busy,
+ * decline" path in `ProviderCommandReactor.processTurnStartRequested` -- it
+ * always sends and the adapter handles concurrency, so "queued" is not a state
+ * the server records anywhere. It is inferred from the absence of a promotion,
+ * and absence of a promotion is not evidence of absence of a send.
+ *
+ * Consequence for anyone tempted to start what they find here: in case 2 you
+ * will re-send a turn the provider may already be executing. Read it to
+ * describe or to promote a turn; do not read it to decide to run one.
+ *
+ * The compaction scenarios in `ProviderCommandReactor.test.ts` are the tests
+ * that catch this. Any change that starts turns from this row must pass them.
+ */
 export const ProjectionPendingTurnStart = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
@@ -123,6 +151,9 @@ export interface ProjectionTurnRepositoryShape {
 
   /**
    * Returns the newest pending-start placeholder for a thread; this is expected to be at most one row after replacement writes.
+   *
+   * See `ProjectionPendingTurnStart` for what the row does and does not mean.
+   * In short: a returned row is not proof that the message was never sent.
    */
   readonly getPendingTurnStartByThreadId: (
     input: GetProjectionPendingTurnStartInput,

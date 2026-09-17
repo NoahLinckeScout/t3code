@@ -1037,6 +1037,12 @@ describe("ProviderCommandReactor", () => {
     }),
   );
 
+  // These compaction scenarios are the guard against starting turns from the
+  // pending turn-start row. A message queued during compaction has been sent
+  // but not yet reported as running, so its row looks exactly like work that
+  // never started -- and an implementation that started what it found there
+  // re-sent the original turn. These were the only tests that caught it. Any
+  // future change that starts turns from that row must pass them unmodified.
   effectIt.effect.each(["resume", "stop before resume", "stop after send"])(
     "queues messages until compaction restores the session (%s)",
     (scenario) =>
