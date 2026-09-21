@@ -396,11 +396,9 @@ describe("agent.* dispatch commands (real engine + sqlite)", () => {
       // Both callers run at once; the loser must join the winner's execution
       // instead of observing an empty receipt table and running the handler
       // again.
-      const outcomes = yield* Effect.forEach(
-        [1, 2],
-        () => dispatchService.dispatch(command),
-        { concurrency: 2 },
-      );
+      const outcomes = yield* Effect.forEach([1, 2], () => dispatchService.dispatch(command), {
+        concurrency: 2,
+      });
       assert.deepStrictEqual(outcomes[0], outcomes[1]);
       const store = yield* DelegationStore;
       const delegations = yield* store.listByParent(PARENT_THREAD);
@@ -702,6 +700,154 @@ describe("delegation waker (real engine + sqlite)", () => {
         WHERE thread_id = ${PARENT_THREAD}
       `;
       assert.strictEqual(rows[0]!.count, 0);
+    }).pipe(Effect.provide(wakeSystemLayer)),
+  );
+
+  it.effect("wakes the parent when a delegated child's turn is force-stopped (interrupted)", () =>
+    Effect.gen(function* () {
+      const engine = yield* OrchestrationEngineService;
+      const store = yield* DelegationStore;
+      const wakeReactor = yield* DelegationWakeReactor;
+      yield* wakeReactor.start();
+
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: dispatchCommandId("wake-interrupt-project"),
+        projectId: PROJECT,
+        title: "Wake Interrupt Project",
+        workspaceRoot: "/tmp/agent-wake-interrupt-test",
+        defaultModelSelection: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      yield* engine.dispatch({
+        type: "thread.create",
+        commandId: dispatchCommandId("wake-interrupt-parent-thread"),
+        threadId: PARENT_THREAD,
+        projectId: PROJECT,
+        title: "Wake Interrupt Parent",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("opencode"),
+          model: "self-hosted-glm/glm-5.3-flash",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        branch: null,
+        worktreePath: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      yield* engine.dispatch({
+        type: "thread.create",
+        commandId: dispatchCommandId("wake-interrupt-thread"),
+        threadId: UNRELATED_THREAD,
+        projectId: PROJECT,
+        title: "Interrupted Child",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("opencode"),
+          model: "self-hosted-glm/glm-5.3-flash",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        branch: null,
+        worktreePath: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+
+      const delegationId = "dlg-wake-interrupted";
+      yield* store.insertPending({
+        delegationId: DelegationId.make(delegationId),
+        parentThreadId: PARENT_THREAD,
+        childThreadId: UNRELATED_THREAD,
+        role: "worker",
+        providerInstanceId: ProviderInstanceId.make("opencode"),
+        model: "self-hosted-glm/glm-5.3-flash",
+        objective: "Wake me when the infrastructure kills my turn",
+        judgment: "Whether the interrupted wake lands",
+        resourceLease: undefined,
+        idempotencyKey: undefined,
+        spawnCommandId: `delegation:${delegationId}:thread-create`,
+        deadlineAt: undefined,
+      });
+      yield* store.markRunning(DelegationId.make(delegationId), UNRELATED_THREAD, 1);
+
+      // The child turn runs, records its diff, and is then stopped from
+      // underneath it — the ClaudeAdapter instance-teardown path settles the
+      // session to "interrupted" ("Session stopped.").
+      yield* engine.dispatch({
+        type: "thread.session.set",
+        commandId: dispatchCommandId("wake-interrupt-session-running"),
+        threadId: UNRELATED_THREAD,
+        session: {
+          threadId: UNRELATED_THREAD,
+          status: "running",
+          providerName: "opencode",
+          runtimeMode: "full-access",
+          activeTurnId: TurnId.make("turn-child-interrupted"),
+          lastError: null,
+          updatedAt: "2026-01-01T00:01:00.000Z",
+        },
+        createdAt: "2026-01-01T00:01:00.000Z",
+      });
+      yield* engine.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: dispatchCommandId("wake-interrupt-turn-record"),
+        threadId: UNRELATED_THREAD,
+        turnId: TurnId.make("turn-child-interrupted"),
+        completedAt: "2026-01-01T00:02:00.000Z",
+        checkpointRef: CheckpointRef.make("refs/t3/checkpoints/wake/interrupted/1"),
+        status: "missing",
+        files: [],
+        checkpointTurnCount: 1,
+        createdAt: "2026-01-01T00:02:00.000Z",
+      });
+      yield* engine.dispatch({
+        type: "thread.session.set",
+        commandId: dispatchCommandId("wake-interrupt-session-interrupted"),
+        threadId: UNRELATED_THREAD,
+        session: {
+          threadId: UNRELATED_THREAD,
+          status: "interrupted",
+          providerName: "opencode",
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: "Session stopped.",
+          updatedAt: "2026-01-01T00:02:30.000Z",
+        },
+        createdAt: "2026-01-01T00:02:30.000Z",
+      });
+      yield* wakeReactor.drain;
+
+      const sql = yield* SqlClient.SqlClient;
+      const parentMessages = yield* sql<{ readonly text: string; readonly role: string }>`
+          SELECT text, role FROM projection_thread_messages
+          WHERE thread_id = ${PARENT_THREAD} AND role = 'user'
+          ORDER BY created_at ASC
+        `;
+      assert.strictEqual(parentMessages.length, 1);
+      assert.match(parentMessages[0]!.text, /child reached interrupted/);
+      assert.match(parentMessages[0]!.text, new RegExp(delegationId));
+
+      // Idempotent: replaying the same interrupted transition wakes nobody again.
+      yield* engine.dispatch({
+        type: "thread.session.set",
+        commandId: dispatchCommandId("wake-interrupt-session-interrupted-2"),
+        threadId: UNRELATED_THREAD,
+        session: {
+          threadId: UNRELATED_THREAD,
+          status: "interrupted",
+          providerName: "opencode",
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: "Session stopped.",
+          updatedAt: "2026-01-01T00:03:00.000Z",
+        },
+        createdAt: "2026-01-01T00:03:00.000Z",
+      });
+      yield* wakeReactor.drain;
+      const parentMessagesAfterReplay = yield* sql<{ readonly text: string }>`
+          SELECT text FROM projection_thread_messages
+          WHERE thread_id = ${PARENT_THREAD} AND role = 'user'
+        `;
+      assert.strictEqual(parentMessagesAfterReplay.length, 1);
     }).pipe(Effect.provide(wakeSystemLayer)),
   );
 });

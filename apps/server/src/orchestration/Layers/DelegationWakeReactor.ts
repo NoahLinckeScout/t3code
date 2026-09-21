@@ -4,9 +4,16 @@
  * A parent that spawns a child over `agent.spawn` gets nothing pushed to it:
  * historically it had to poll `agent_inbox`, and an MCP-less coordinator
  * polling on its own clock is exactly the latency this reactor removes. When a
- * child thread's turn reaches a terminal state (completed/error), the waker
- * dispatches one `thread.turn.start` on the parent with a short pointer to the
- * inbox and the delegation id.
+ * child thread's turn reaches a terminal state (completed/error/interrupted),
+ * the waker dispatches one `thread.turn.start` on the parent with a short
+ * pointer to the inbox and the delegation id.
+ *
+ * `interrupted` wakes too: infrastructure stops a child session without the
+ * parent ever learning the lane died mid-work. A settings-driven provider
+ * instance rebuild force-stops every live session ("Session stopped." settles
+ * the turn as interrupted); without a wake, a delegated lane killed that way
+ * idles until a human re-dispatches it. The wake is a message into the
+ * existing parent thread — never a supervisor respawn.
  *
  * Same shape as a stream watchdog, and bounded by the same discipline:
  *
@@ -92,11 +99,17 @@ const make = Effect.gen(function* () {
     }
     // Leaving the "running" session status is the authoritative turn-end
     // signal (the same one ProjectionPipeline settles turns on). ready/idle
-    // project to a completed turn; error projects to an errored one; starting/
-    // running/interrupted/stopped are not the settled completion this waker
-    // exists for.
+    // project to a completed turn; error projects to an errored one;
+    // interrupted/stopped project to an interrupted one — a lane stopped
+    // underneath its parent (provider instance rebuild, crash, reaper) must
+    // wake the parent too, or the lane idles mid-work until a human notices.
+    // starting/running are not turn-end states.
     const settledTurnState = settledTurnStateForSessionStatus(event.payload.session.status);
-    if (settledTurnState !== "completed" && settledTurnState !== "error") {
+    if (
+      settledTurnState !== "completed" &&
+      settledTurnState !== "error" &&
+      settledTurnState !== "interrupted"
+    ) {
       return;
     }
 

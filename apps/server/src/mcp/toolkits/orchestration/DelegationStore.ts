@@ -203,9 +203,9 @@ export interface DelegationStoreShape {
     childThreadId: ThreadId,
   ) => Effect.Effect<DelegationRow | undefined, OrchestrationToolkitError>;
   /**
-   * The most recent terminal turn id (completed/error) recorded for a thread,
-   * or null when it has none. Names the idempotency key for one wake per child
-   * terminal turn.
+   * The most recent terminal turn id (completed/error/interrupted) recorded
+   * for a thread, or null when it has none. Names the idempotency key for one
+   * wake per child terminal turn.
    */
   readonly latestTerminalTurnIdOfThread: (
     threadId: ThreadId,
@@ -717,7 +717,9 @@ const makeDelegationStore = Effect.gen(function* () {
       function* (threadId) {
         const rows = yield* sql<{ readonly turnId: string | null }>`
           SELECT turn_id AS "turnId" FROM projection_turns
-          WHERE thread_id = ${threadId} AND state IN ('completed', 'error') AND turn_id IS NOT NULL
+          WHERE thread_id = ${threadId}
+            AND state IN ('completed', 'error', 'interrupted')
+            AND turn_id IS NOT NULL
           ORDER BY row_id DESC LIMIT 1
         `;
         return rows[0]?.turnId ?? null;
