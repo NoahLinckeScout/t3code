@@ -9,8 +9,10 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ServerConfig } from "../../../config.ts";
+import { SqlitePersistenceMemory } from "../../../persistence/Layers/Sqlite.ts";
 import { catalogInstancesFromSettings, OrchestrationRoles, parseCatalogRoleKey } from "./roles.ts";
 import * as OrchestrationRolesModule from "./roles.ts";
 import { OrchestrationToolkitError } from "./schemas.ts";
@@ -69,6 +71,7 @@ const SETTINGS_JSON = `{
 const rolesLayer = OrchestrationRolesModule.layer.pipe(
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-roles-catalog-test-" })),
   Layer.provideMerge(NodeServices.layer),
+  Layer.provideMerge(SqlitePersistenceMemory),
 );
 
 const writeFixtures = Effect.fn("rolesTest.writeFixtures")(function* () {
@@ -77,6 +80,58 @@ const writeFixtures = Effect.fn("rolesTest.writeFixtures")(function* () {
   yield* fs.writeFileString(`${config.stateDir}/orchestration-roles.json`, NAMED_ROLES_JSON);
   yield* fs.writeFileString(config.settingsPath, SETTINGS_JSON);
 });
+
+const writeRolesFile = Effect.fn("rolesTest.writeRolesFile")(function* (rolesJson: string) {
+  const config = yield* ServerConfig;
+  const fs = yield* FileSystem.FileSystem;
+  yield* fs.writeFileString(`${config.stateDir}/orchestration-roles.json`, rolesJson);
+});
+
+/**
+ * Seed one projection thread with a latest turn in the given state, so the
+ * placement query has real rows to count. `model` is what
+ * `model_selection_json` records — the concrete slug chosen at spawn.
+ */
+const seedRunningTurn = Effect.fn("rolesTest.seedRunningTurn")(function* (
+  threadId: string,
+  model: string,
+  state: string,
+) {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`
+    INSERT INTO projection_threads (
+      thread_id, project_id, title, created_at, updated_at,
+      runtime_mode, interaction_mode, pending_approval_count,
+      pending_user_input_count, has_actionable_proposed_plan, model_selection_json
+    ) VALUES (
+      ${threadId}, 'project-roles-test', ${"Seed " + threadId}, '2026-09-21T00:00:00.000Z', '2026-09-21T00:00:00.000Z',
+      'full-access', 'default', 0, 0, 0, ${JSON.stringify({ instanceId: "claudeAgent", model })}
+    )
+  `;
+  yield* sql`
+    INSERT INTO projection_turns (thread_id, turn_id, state, requested_at, checkpoint_files_json)
+    VALUES (${threadId}, ${threadId + "-turn"}, ${state}, '2026-09-21T00:00:00.000Z', '[]')
+  `;
+  yield* sql`
+    UPDATE projection_threads SET latest_turn_id = ${threadId + "-turn"} WHERE thread_id = ${threadId}
+  `;
+});
+
+const CANDIDATE_ROLES_JSON = `{
+  "maxDepth": 2,
+  "roles": {
+    "implement": {
+      "providerInstanceId": "claudeAgent",
+      "model": "glm-5.3-flash",
+      "candidates": ["glm-5.3-flash", "glm-5.3-flash-c2"],
+      "modelHosts": { "glm-5.3-flash": "crusoe-7", "glm-5.3-flash-c2": "crusoe-2" }
+    },
+    "pinned": {
+      "providerInstanceId": "claudeAgent",
+      "model": "glm-5.3-flash-c2"
+    }
+  }
+}`;
 
 describe("parseCatalogRoleKey", () => {
   it("splits on the first slash so model slugs may contain slashes", () => {
@@ -218,6 +273,108 @@ describe("OrchestrationRoles catalog fallback", () => {
       const roles = yield* OrchestrationRoles;
       assert.strictEqual(yield* roles.canSpawnFrom("claudeAgent/glm-5.3-flash"), false);
       assert.strictEqual(yield* roles.canSpawnFrom("research"), false);
+    }).pipe(Effect.provide(rolesLayer)),
+  );
+});
+
+describe("OrchestrationRoles load-aware placement", () => {
+  it.effect("binds to the least-loaded host's first candidate", () =>
+    Effect.gen(function* () {
+      yield* writeRolesFile(CANDIDATE_ROLES_JSON);
+      // crusoe-7 carries three live turns, crusoe-2 carries one.
+      yield* seedRunningTurn("t-c7-a", "glm-5.3-flash", "running");
+      yield* seedRunningTurn("t-c7-b", "glm-5.3-flash", "running");
+      yield* seedRunningTurn("t-c7-c", "glm-5.3-flash", "pending");
+      yield* seedRunningTurn("t-c2-a", "glm-5.3-flash-c2", "running");
+      const roles = yield* OrchestrationRoles;
+      const resolved = yield* roles.resolve("implement");
+      assert.strictEqual(resolved.model, "glm-5.3-flash-c2");
+    }).pipe(Effect.provide(rolesLayer)),
+  );
+
+  it.effect("counts alias slugs toward the host they rewrite to", () =>
+    Effect.gen(function* () {
+      // glm-5.3-flash-deep is not a candidate but its host (crusoe-7) already
+      // carries its turn; placement must see that load or the head wins on a
+      // machine that is actually twice as busy.
+      yield* writeRolesFile(
+        CANDIDATE_ROLES_JSON.replace(
+          '"modelHosts": { "glm-5.3-flash": "crusoe-7", "glm-5.3-flash-c2": "crusoe-2" }',
+          '"modelHosts": { "glm-5.3-flash": "crusoe-7", "glm-5.3-flash-deep": "crusoe-7", "glm-5.3-flash-c2": "crusoe-2" }',
+        ),
+      );
+      yield* seedRunningTurn("t-c7-a", "glm-5.3-flash", "running");
+      yield* seedRunningTurn("t-c7-alias", "glm-5.3-flash-deep", "running");
+      const roles = yield* OrchestrationRoles;
+      // crusoe-7 reads 2 (flash + deep alias), crusoe-2 reads 0.
+      const resolved = yield* roles.resolve("implement");
+      assert.strictEqual(resolved.model, "glm-5.3-flash-c2");
+    }).pipe(Effect.provide(rolesLayer)),
+  );
+
+  it.effect("breaks a tie toward the earlier candidate", () =>
+    Effect.gen(function* () {
+      yield* writeRolesFile(CANDIDATE_ROLES_JSON);
+      yield* seedRunningTurn("t-c2-a", "glm-5.3-flash-c2", "running");
+      yield* seedRunningTurn("t-c7-a", "glm-5.3-flash", "running");
+      const roles = yield* OrchestrationRoles;
+      const resolved = yield* roles.resolve("implement");
+      assert.strictEqual(resolved.model, "glm-5.3-flash");
+    }).pipe(Effect.provide(rolesLayer)),
+  );
+
+  it.effect("falls back to the head when the projection is unreadable", () =>
+    Effect.gen(function* () {
+      yield* writeRolesFile(CANDIDATE_ROLES_JSON);
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`DROP TABLE projection_turns`;
+      const roles = yield* OrchestrationRoles;
+      const resolved = yield* roles.resolve("implement");
+      assert.strictEqual(resolved.model, "glm-5.3-flash");
+    }).pipe(Effect.provide(rolesLayer)),
+  );
+
+  it.effect("leaves a role without candidates exactly as authored", () =>
+    Effect.gen(function* () {
+      yield* writeRolesFile(CANDIDATE_ROLES_JSON);
+      yield* seedRunningTurn("t-c2-a", "glm-5.3-flash-c2", "running");
+      const roles = yield* OrchestrationRoles;
+      const resolved = yield* roles.resolve("pinned");
+      assert.strictEqual(resolved.model, "glm-5.3-flash-c2");
+    }).pipe(Effect.provide(rolesLayer)),
+  );
+
+  it.effect("refuses candidates whose head disagrees with the role's model", () =>
+    Effect.gen(function* () {
+      yield* writeRolesFile(
+        CANDIDATE_ROLES_JSON.replace(
+          '"candidates": ["glm-5.3-flash", "glm-5.3-flash-c2"]',
+          '"candidates": ["glm-5.3-flash-c2", "glm-5.3-flash"]',
+        ),
+      );
+      const roles = yield* OrchestrationRoles;
+      const failed = yield* roles.resolve("implement").pipe(Effect.flip);
+      if (!isToolkitError(failed)) {
+        return assert.fail(`expected a toolkit error, got ${String(failed)}`);
+      }
+      assert.strictEqual(failed.reason, "roles_config_missing");
+    }).pipe(Effect.provide(rolesLayer)),
+  );
+
+  it.effect("refuses a candidate with no declared host", () =>
+    Effect.gen(function* () {
+      yield* writeRolesFile(
+        CANDIDATE_ROLES_JSON.replace(
+          '"modelHosts": { "glm-5.3-flash": "crusoe-7", "glm-5.3-flash-c2": "crusoe-2" }',
+          '"modelHosts": { "glm-5.3-flash": "crusoe-7" }',
+        ),
+      );
+      const roles = yield* OrchestrationRoles;
+      const failed = yield* roles.resolve("implement").pipe(Effect.flip);
+      if (!isToolkitError(failed)) {
+        return assert.fail(`expected a toolkit error, got ${String(failed)}`);
+      }
+      assert.strictEqual(failed.reason, "roles_config_missing");
     }).pipe(Effect.provide(rolesLayer)),
   );
 });
