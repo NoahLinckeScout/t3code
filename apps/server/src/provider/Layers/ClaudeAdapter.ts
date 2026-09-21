@@ -33,6 +33,7 @@ import {
   type CanonicalItemType,
   type CanonicalRequestType,
   type ClaudeSettings,
+  type CustomModelSetting,
   EventId,
   type ProviderApprovalDecision,
   ProviderDriverKind,
@@ -381,6 +382,14 @@ export interface ClaudeAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   readonly modelCatalog?: Effect.Effect<ClaudeModelCatalog>;
+  /**
+   * Live customModels for catalog scoping. When provided it replaces the
+   * construction-time `claudeSettings.customModels`, so a settings edit that
+   * adds or removes a custom model reaches new sessions without rebuilding
+   * the instance — a rebuild closes the instance scope and force-stops every
+   * in-flight session.
+   */
+  readonly customModels?: Effect.Effect<ReadonlyArray<CustomModelSetting>>;
   /** Scoped-bucket names the driver's status probe last saw; see `claudeUsageLimits`. */
   readonly scopedLimitNames?: Ref.Ref<ClaudeScopedLimitNames>;
 }
@@ -1957,7 +1966,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("claudeAgent");
   const modelCatalogEffect = (
     options?.modelCatalog ?? Effect.succeed(BUNDLED_CLAUDE_MODEL_CATALOG)
-  ).pipe(Effect.map((catalog) => scopeClaudeModelCatalog(catalog, claudeSettings.customModels)));
+  ).pipe(
+    Effect.flatMap((catalog) =>
+      (options?.customModels ?? Effect.succeed(claudeSettings.customModels)).pipe(
+        Effect.map((customModels) => scopeClaudeModelCatalog(catalog, customModels)),
+      ),
+    ),
+  );
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const serverConfig = yield* ServerConfig;

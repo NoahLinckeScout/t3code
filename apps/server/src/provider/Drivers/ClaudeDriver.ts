@@ -12,14 +12,24 @@
  *
  * @module provider/Drivers/ClaudeDriver
  */
-import { ClaudeSettings, ProviderDriverKind } from "@t3tools/contracts";
+import {
+  ClaudeSettings,
+  defaultInstanceIdForDriver,
+  type CustomModelSetting,
+  ProviderDriverKind,
+  type ProviderInstanceId,
+  type ServerSettings,
+} from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Duration from "effect/Duration";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Equal from "effect/Equal";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
@@ -66,6 +76,52 @@ const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
 const CAPABILITIES_PROBE_TTL = Duration.minutes(5);
 
+/**
+ * Resolve the instance's current `ClaudeSettings` from a `ServerSettings`
+ * snapshot: the explicit `providerInstances` entry when one exists, else the
+ * legacy `providers.claudeAgent` mirror — the same origin
+ * `deriveProviderInstanceConfigMap` synthesizes the instance envelope from —
+ * else the config the instance was built with. A malformed explicit config
+ * falls back rather than failing: the registry surfaces decode errors through
+ * its own unavailable bucket, and this read only feeds live model scoping and
+ * snapshot probes.
+ */
+export const resolveLiveClaudeSettings = (input: {
+  readonly settings: ServerSettings;
+  readonly instanceId: ProviderInstanceId;
+  readonly fallback: ClaudeSettings;
+}): Effect.Effect<ClaudeSettings> =>
+  Effect.gen(function* () {
+    const explicit = input.settings.providerInstances[input.instanceId];
+    if (explicit !== undefined) {
+      const decoded = yield* Schema.decodeUnknownEffect(ClaudeSettings)(
+        explicit.config ?? decodeClaudeSettings({}),
+      ).pipe(Effect.option);
+      return Option.isSome(decoded) ? decoded.value : input.fallback;
+    }
+    if (input.instanceId === defaultInstanceIdForDriver(DRIVER_KIND)) {
+      return input.settings.providers.claudeAgent;
+    }
+    return input.fallback;
+  });
+
+const stripCustomModels = (config: unknown): unknown => {
+  if (config === null || typeof config !== "object" || Array.isArray(config)) {
+    return config;
+  }
+  const { customModels: _customModels, ...rest } = config as Record<string, unknown>;
+  return rest;
+};
+
+/**
+ * A customModels add/remove only changes which models NEW sessions can
+ * select; in-flight sessions keep their process and their model. Everything
+ * else in the config shapes the session process and needs a rebuild — which
+ * closes the instance scope and force-stops every session it is running.
+ */
+export const claudeConfigDeltaSparesSessions = (previous: unknown, next: unknown): boolean =>
+  Equal.equals(stripCustomModels(previous), stripCustomModels(next));
+
 function isClaudeNativeCommandPath(commandPath: string): boolean {
   const normalized = normalizeCommandPath(commandPath);
   return (
@@ -103,6 +159,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
     supportsMultipleInstances: true,
   },
   configSchema: ClaudeSettings,
+  configChangeSparesSessions: claudeConfigDeltaSparesSessions,
   defaultConfig: (): ClaudeSettings => decodeClaudeSettings({}),
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
@@ -125,6 +182,24 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         enabled,
         binaryPath: expandHomePath(config.binaryPath),
       } satisfies ClaudeSettings;
+      // Live settings read: customModels changes must reach NEW sessions and
+      // the model list without a rebuild. A rebuild closes the instance scope
+      // and force-stops every in-flight session ("Session stopped."), which
+      // is why the registry spares customModels-only deltas
+      // (`configChangeSparesSessions` below) — that spare is only correct if
+      // the delta is actually delivered, so everything that consumes
+      // customModels re-resolves it from settings instead of the captured
+      // config. binaryPath/homePath stay construction-time: they shape the
+      // session process, and changing them rebuilds the instance.
+      const liveSettings = serverSettings.getSettings.pipe(
+        Effect.flatMap((settings) =>
+          resolveLiveClaudeSettings({ settings, instanceId, fallback: effectiveConfig }),
+        ),
+        Effect.orElseSucceed(() => effectiveConfig),
+      );
+      const liveCustomModels: Effect.Effect<ReadonlyArray<CustomModelSetting>> = liveSettings.pipe(
+        Effect.map((settings) => settings.customModels),
+      );
       const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
         resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
           binaryPath: effectiveConfig.binaryPath,
@@ -151,6 +226,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         instanceId,
         environment: processEnv,
         modelCatalog,
+        customModels: liveCustomModels,
         scopedLimitNames,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       };
@@ -159,6 +235,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         effectiveConfig,
         processEnv,
         modelCatalog,
+        liveCustomModels,
       );
 
       // Per-instance capabilities cache: keyed on binary + resolved HOME so
@@ -179,13 +256,17 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         Effect.andThen(
           modelManifest.current.pipe(
             Effect.flatMap((manifest) =>
-              checkClaudeProviderStatus(
-                effectiveConfig,
-                () => Cache.get(capabilitiesProbeCache, capabilitiesCacheKey),
-                processEnv,
-                cwd,
-                resolveClaudeModelCatalog(manifest),
-                scopedLimitNames,
+              liveSettings.pipe(
+                Effect.flatMap((settings) =>
+                  checkClaudeProviderStatus(
+                    settings,
+                    () => Cache.get(capabilitiesProbeCache, capabilitiesCacheKey),
+                    processEnv,
+                    cwd,
+                    resolveClaudeModelCatalog(manifest),
+                    scopedLimitNames,
+                  ),
+                ),
               ),
             ),
             Effect.map(stampIdentity),
@@ -196,7 +277,32 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         Effect.provideService(Path.Path, path),
       );
 
-      const snapshotSettings = makeProviderSnapshotSettingsSource(effectiveConfig, serverSettings);
+      // The snapshot's model list must follow settings edits in place: a
+      // customModels delta no longer rebuilds the instance (see
+      // `configChangeSparesSessions`), so the managed provider detects the
+      // change through this live source and re-probes with the fresh config.
+      const snapshotSettings = {
+        getSettings: serverSettings.getSettings.pipe(
+          Effect.flatMap((settings) =>
+            resolveLiveClaudeSettings({ settings, instanceId, fallback: effectiveConfig }).pipe(
+              Effect.map((provider) => ({
+                provider,
+                enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
+              })),
+            ),
+          ),
+        ),
+        streamSettings: serverSettings.streamChanges.pipe(
+          Stream.mapEffect((settings) =>
+            resolveLiveClaudeSettings({ settings, instanceId, fallback: effectiveConfig }).pipe(
+              Effect.map((provider) => ({
+                provider,
+                enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
+              })),
+            ),
+          ),
+        ),
+      };
       const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<ClaudeSettings>>({
         resolveMaintenance,
         getSettings: snapshotSettings.getSettings,

@@ -623,3 +623,129 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
     }).pipe(Effect.provide(testLayer)),
   );
 });
+
+describe("ProviderInstanceRegistryLive — session-stable config deltas", () => {
+  // Same stack as the all-drivers slice: the claude driver is exercised for
+  // real (adapter + managed snapshot), just with `enabled: false` so no
+  // binary is spawned and the snapshot short-circuits to its model list.
+  // The infra layer satisfies the full `BuiltInDriversEnv` the registry
+  // generic demands even though only ClaudeDriver is registered here.
+  const infraLayer = OpenCodeRuntimeLive.pipe(Layer.provideMerge(NodeServices.layer));
+  const testLayer = AntigravityInstallation.layer.pipe(
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), {
+        prefix: "provider-instance-registry-spare-test",
+      }),
+    ),
+    Layer.provideMerge(infraLayer),
+    Layer.provideMerge(BackgroundPolicyAlwaysRunLayer),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(TestHttpClientLive),
+    Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+    Layer.provideMerge(ModelManifest.layerTest),
+    Layer.provideMerge(CodexResetCredit.layerTest),
+  );
+
+  const claudeId = ProviderInstanceId.make("claudeAgent");
+  const claudeDriverKind = ProviderDriverKind.make("claudeAgent");
+
+  const claudeEntry = (config: ClaudeSettings) => ({
+    driver: claudeDriverKind,
+    enabled: false,
+    config,
+  });
+
+  it.live(
+    "keeps the live instance across a customModels-only delta and refreshes its model list",
+    () =>
+      Effect.gen(function* () {
+        const configWithC8 = makeClaudeConfig({ customModels: ["c8"] });
+        const configWithoutC8 = makeClaudeConfig({ customModels: [] });
+
+        // Seed the settings service so the driver's live read resolves the
+        // same origin the envelope was built from (explicit providerInstances
+        // entry), mirroring what hydration derives in production.
+        const serverSettings = yield* ServerSettingsService;
+        yield* serverSettings.updateSettings({
+          providerInstances: { [claudeId]: claudeEntry(configWithC8) },
+        });
+
+        const { registry, mutator } = yield* makeProviderInstanceRegistry<BuiltInDriversEnv>({
+          drivers: [ClaudeDriver],
+          configMap: { [claudeId]: claudeEntry(configWithC8) },
+        });
+
+        const before = yield* registry.getInstance(claudeId);
+        expect(before).toBeDefined();
+        const modelsBefore = (yield* before!.snapshot.getSnapshot).models;
+        expect(modelsBefore.some((model) => model.slug === "c8")).toBe(true);
+
+        // The c8 removal: the settings write the fleet worker made, plus the
+        // reconcile the settings watcher drives. This delta must NOT close the
+        // instance scope — closing it force-stops every in-flight session.
+        yield* serverSettings.updateSettings({
+          providerInstances: { [claudeId]: claudeEntry(configWithoutC8) },
+        });
+        yield* mutator.reconcile({ [claudeId]: claudeEntry(configWithoutC8) });
+
+        const after = yield* registry.getInstance(claudeId);
+        expect(after).toBe(before);
+
+        // The model list still follows the edit in place: the snapshot
+        // re-probe resolves settings live instead of from the frozen config.
+        yield* after!.snapshot.refresh;
+        const modelsAfter = (yield* after!.snapshot.getSnapshot).models;
+        expect(modelsAfter.some((model) => model.slug === "c8")).toBe(false);
+      }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.live("still rebuilds when the delta shapes the session process", () =>
+    Effect.gen(function* () {
+      const configA = makeClaudeConfig({ binaryPath: "claude" });
+      const configB = makeClaudeConfig({ binaryPath: "/opt/claude/bin/claude" });
+
+      const { registry, mutator } = yield* makeProviderInstanceRegistry<BuiltInDriversEnv>({
+        drivers: [ClaudeDriver],
+        configMap: { [claudeId]: claudeEntry(configA) },
+      });
+      const before = yield* registry.getInstance(claudeId);
+      expect(before).toBeDefined();
+
+      yield* mutator.reconcile({ [claudeId]: claudeEntry(configB) });
+
+      const after = yield* registry.getInstance(claudeId);
+      expect(after).toBeDefined();
+      expect(after).not.toBe(before);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.live("does not spare a delta whose new config fails to decode", () =>
+    Effect.gen(function* () {
+      const configA = makeClaudeConfig({ customModels: [] });
+
+      const { registry, mutator } = yield* makeProviderInstanceRegistry<BuiltInDriversEnv>({
+        drivers: [ClaudeDriver],
+        configMap: { [claudeId]: claudeEntry(configA) },
+      });
+      const before = yield* registry.getInstance(claudeId);
+      expect(before).toBeDefined();
+
+      // The delta is customModels-only (so the driver's predicate accepts
+      // it), but the new value is malformed — an invalid config must keep
+      // surfacing as an unavailable shadow, not be silently ignored behind a
+      // spared scope.
+      yield* mutator.reconcile({
+        [claudeId]: {
+          driver: claudeDriverKind,
+          enabled: false,
+          config: { ...configA, customModels: "not-an-array" },
+        },
+      });
+
+      const after = yield* registry.getInstance(claudeId);
+      expect(after).toBeUndefined();
+      const unavailable = yield* registry.listUnavailable;
+      expect(unavailable.some((snapshot) => snapshot.instanceId === claudeId)).toBe(true);
+    }).pipe(Effect.provide(testLayer)),
+  );
+});
