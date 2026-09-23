@@ -597,6 +597,25 @@ function selectedClaudeContextWindow(
   return resolveClaudeCatalogContextWindowTokens(catalog, modelSelection);
 }
 
+// A bracketed context-window suffix in the model id (e.g. the "[1m]" in
+// "claude-opus-5[1m]") pins the model to that window even when the selected
+// catalog entry is a custom passthrough carrying no runtime profile. The
+// suffix-to-tokens mapping comes from the built-in profiles that define the
+// suffixes, so no window size is duplicated here.
+function claudeSuffixContextWindowTokens(
+  catalog: ClaudeModelCatalog,
+  modelId: string | undefined,
+): number | undefined {
+  if (!modelId) return undefined;
+  for (const entry of catalog.models) {
+    const suffixes = entry.runtime.modelSuffixes?.contextWindow ?? {};
+    for (const [optionId, suffix] of Object.entries(suffixes)) {
+      if (modelId.endsWith(suffix)) return entry.runtime.contextWindowTokens?.[optionId];
+    }
+  }
+  return undefined;
+}
+
 function finiteNonNegativeInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? Math.round(value)
@@ -4700,13 +4719,29 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         (launchArgSkipPermissions === null || launchArgSkipPermissions === "true"
           ? "bypassPermissions"
           : runtimeModeToPermission[input.runtimeMode]);
+      // The CLI clamps a settings window against the model's own context, so a
+      // small global value would cap every larger-window model: a 350k setting
+      // compacted 1M-context opus at ~318k while GLM routes escaped via router
+      // env. Forward the configured window only when it does not lower the
+      // model's native window; models with an unknown window (custom
+      // gateways) keep it, preserving their autocompact fallback.
+      const configuredAutoCompactWindow = claudeSettings.autoCompactWindow
+        ? Number(claudeSettings.autoCompactWindow)
+        : undefined;
+      const nativeContextWindow =
+        initialContextWindow ??
+        claudeSuffixContextWindowTokens(modelCatalog, apiModelId ?? modelSelection?.model);
+      const autoCompactWindow =
+        nativeContextWindow === undefined ||
+        configuredAutoCompactWindow === undefined ||
+        configuredAutoCompactWindow >= nativeContextWindow
+          ? configuredAutoCompactWindow
+          : undefined;
       const settings = {
         ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
         ...(fastMode ? { fastMode: true } : {}),
         ...(ultracode ? { ultracode: true } : {}),
-        ...(claudeSettings.autoCompactWindow
-          ? { autoCompactWindow: Number(claudeSettings.autoCompactWindow) }
-          : {}),
+        ...(autoCompactWindow !== undefined ? { autoCompactWindow } : {}),
       };
       const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
       // The attachments dir grant lets the agent Read/copy pasted images at
