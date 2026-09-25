@@ -44,13 +44,19 @@ key; `child_thread_id` is a locator recorded on the row. A thread id changes on
 retry and is meaningless after archival, so keying on it would make provider
 identity load-bearing.
 
-**Roles name capability; config names a vendor.** `agent_spawn(role: "reviewer")`
-resolves through `<stateDir>/orchestration-roles.json`. If the tool call named a
-provider, every prompt in the system would encode one vendor and swapping the
-backend would mean editing prose across every thread.
+**Roles name capability; the provider catalog names reachable models.**
+`agent_spawn(role: "reviewer")` resolves through
+`<stateDir>/orchestration-roles.json` and keeps the standing contract
+(instructions, `canSpawn`, deadline, bound model). A model that already works
+in t3code is also reachable as `instanceId/model` (first `/` splits the
+instance from the slug) against `<stateDir>/settings.json`
+`providerInstances.*.config.customModels` — the same registry
+`t3-orchestrate spawn --model-selection` uses. Adding a slug there is enough;
+do not add a new named role per model.
 
-There are no default roles. `providerInstanceId` is a per-install value, so
-guessing one would silently choose a vendor. Missing config fails closed.
+Named roles win on collision. Catalog keys cannot spawn onward. Missing roles
+config still fails closed for capability names; unknown catalog keys fail
+closed. There is still no `modelSelection` on the wire.
 
 **Silence is never success.** No code path reaches `completed` except an accepted
 `agent_handoff`, and a `completed` handoff with an empty `validation` list is

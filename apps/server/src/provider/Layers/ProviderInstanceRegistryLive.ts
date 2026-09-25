@@ -94,12 +94,23 @@ const entryEqual = (a: ProviderInstanceConfig, b: ProviderInstanceConfig): boole
   Equal.equals(a, b);
 
 /**
+ * Envelope delta (everything but `driver` and `config`) between two entries.
+ * An empty delta means only the config payload moved.
+ */
+const envelopeDelta = (previous: ProviderInstanceConfig, next: ProviderInstanceConfig): boolean => {
+  const { config: _prevConfig, driver: _prevDriver, ...prevEnvelope } = previous;
+  const { config: _nextConfig, driver: _nextDriver, ...nextEnvelope } = next;
+  return !Equal.equals(prevEnvelope, nextEnvelope);
+};
+
+/**
  * True when the instance can keep its live scope across this config delta:
- * the driver declares the delta session-stable AND the new config still
- * decodes. An invalid config must keep surfacing as an unavailable shadow
- * snapshot, not be silently ignored behind a spared scope. Closing an
- * instance scope force-stops every session it is running mid-turn, so this
- * is the gate that decides whether a settings edit kills the fleet.
+ * the envelope is unchanged, the driver declares the delta session-stable,
+ * AND the new config still decodes. An invalid config must keep surfacing as
+ * an unavailable shadow snapshot, not be silently ignored behind a spared
+ * scope. Closing an instance scope force-stops every session it is running
+ * mid-turn, so this is the gate that decides whether a settings edit kills
+ * the fleet.
  */
 const configDeltaSparesSessions = <R>(
   driversById: ReadonlyMap<ProviderDriverKind, AnyProviderDriver<R>>,
@@ -108,6 +119,13 @@ const configDeltaSparesSessions = <R>(
 ): Effect.Effect<boolean> =>
   Effect.gen(function* () {
     if (previous.driver !== next.driver) {
+      return false;
+    }
+    // Envelope fields (enabled, displayName, accentColor, environment) were
+    // captured by the driver's `create()` at build time; a spared scope would
+    // keep serving the stale values — including staying up after a disable —
+    // so any envelope delta rebuilds regardless of what the config did.
+    if (envelopeDelta(previous, next)) {
       return false;
     }
     const driver = driversById.get(next.driver);

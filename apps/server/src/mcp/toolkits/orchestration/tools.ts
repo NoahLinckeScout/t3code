@@ -31,7 +31,7 @@ const dependencies = [
 
 export const AgentSpawnTool = Tool.make("agent_spawn", {
   description:
-    "Delegate bounded work to a child agent on any configured provider. You name a role, not a vendor: this environment's roles config decides which provider instance and model serve it. Returns immediately with a delegationId; the child runs on its own and reports back through agent_handoff, which you read with agent_inbox. Requires a judgment field naming the decision the child must make — if the work has no judgment in it, write a script instead of spawning a model.",
+    "Delegate bounded work to a child agent on any configured provider. Prefer a named capability role from this environment's orchestration roles config (instructions, canSpawn, model binding). A model that already works in t3code is also reachable as instanceId/model with no extra role — e.g. claudeAgent/glm-5.3-flash — resolved from the same settings.json catalog t3-orchestrate uses. Returns immediately with a delegationId; the child reports back through agent_handoff, which you read with agent_inbox. Requires a judgment field naming the decision the child must make — if the work has no judgment in it, write a script instead of spawning a model.",
   parameters: SpawnInput,
   success: SpawnResult,
   failure: OrchestrationToolkitError,
