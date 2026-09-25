@@ -429,24 +429,35 @@ const makeOrchestrationRoles = Effect.gen(function* () {
   });
 
   /**
-   * Running and pending turn counts per model slug, from the same projection
-   * the server already maintains. Pending counts: a host has accepted that
-   * work even if it has not started it, and a host pinned at its own
-   * concurrency cap reports a constant running count — the queue behind it is
-   * what distinguishes saturated from comfortable.
+   * Running and pending turn counts per (provider instance, model slug), from
+   * the same projection the server already maintains. The routing instanceId
+   * is part of the key: two configured instances can expose the same slug,
+   * and a busy unrelated instance must not make this role avoid an otherwise
+   * idle host. Pending counts: a host has accepted that work even if it has
+   * not started it, and a host pinned at its own concurrency cap reports a
+   * constant running count — the queue behind it is what distinguishes
+   * saturated from comfortable.
    */
-  const slugLoads = Effect.fn("OrchestrationRoles.slugLoads")(function* () {
-    const rows = yield* sql<{ readonly model: string; readonly load: number }>`
-      SELECT json_extract(t.model_selection_json, '$.model') AS model, COUNT(*) AS load
+  const instanceModelLoads = Effect.fn("OrchestrationRoles.instanceModelLoads")(function* () {
+    const rows = yield* sql<{
+      readonly instanceId: string;
+      readonly model: string;
+      readonly load: number;
+    }>`
+      SELECT json_extract(t.model_selection_json, '$.instanceId') AS instanceId,
+             json_extract(t.model_selection_json, '$.model') AS model, COUNT(*) AS load
       FROM projection_threads t
       JOIN projection_turns u ON u.turn_id = t.latest_turn_id AND u.thread_id = t.thread_id
       WHERE u.state IN ('running', 'pending')
+        AND json_extract(t.model_selection_json, '$.instanceId') IS NOT NULL
         AND json_extract(t.model_selection_json, '$.model') IS NOT NULL
-      GROUP BY model
+      GROUP BY instanceId, model
     `;
-    const loads = new Map<string, number>();
+    const loads = new Map<string, Map<string, number>>();
     for (const row of rows) {
-      loads.set(row.model, Number(row.load));
+      const byModel = loads.get(row.instanceId) ?? new Map<string, number>();
+      byModel.set(row.model, Number(row.load));
+      loads.set(row.instanceId, byModel);
     }
     return loads;
   });
@@ -460,20 +471,25 @@ const makeOrchestrationRoles = Effect.gen(function* () {
    * Load is summed over every slug in `modelHosts`, not only the candidates:
    * alias slugs that rewrite to the same host on the way out
    * (`glm-5.3-flash-deep` → the flash host) are load that host already
-   * carries, and ignoring them would double-book the machine.
+   * carries, and ignoring them would double-book the machine. Only turns
+   * routed to the role's own provider instance count — the load query keys on
+   * the routing instanceId, so another instance serving the same slug stays
+   * out of this role's arithmetic.
    */
   const placeOnCandidates = Effect.fn("OrchestrationRoles.placeOnCandidates")(function* (
     head: string,
     candidates: ReadonlyArray<string>,
     modelHosts: Readonly<Record<string, string>>,
+    providerInstanceId: ProviderInstanceId,
   ) {
-    const loads = yield* slugLoads().pipe(Effect.option);
+    const loads = yield* instanceModelLoads().pipe(Effect.option);
     if (Option.isNone(loads)) {
       return head;
     }
+    const instanceLoads = loads.value.get(providerInstanceId) ?? new Map<string, number>();
     const hostLoad = new Map<string, number>();
     for (const [slug, host] of Object.entries(modelHosts)) {
-      hostLoad.set(host, (hostLoad.get(host) ?? 0) + (loads.value.get(slug) ?? 0));
+      hostLoad.set(host, (hostLoad.get(host) ?? 0) + (instanceLoads.get(slug) ?? 0));
     }
     const loadOf = (slug: string): number => {
       const host = modelHosts[slug];
@@ -505,7 +521,12 @@ const makeOrchestrationRoles = Effect.gen(function* () {
       }
       const model =
         definition.candidates !== undefined && definition.modelHosts !== undefined
-          ? yield* placeOnCandidates(definition.model, definition.candidates, definition.modelHosts)
+          ? yield* placeOnCandidates(
+              definition.model,
+              definition.candidates,
+              definition.modelHosts,
+              definition.providerInstanceId,
+            )
           : definition.model;
       return {
         name: roleName,

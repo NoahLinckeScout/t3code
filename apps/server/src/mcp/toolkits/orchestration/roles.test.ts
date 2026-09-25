@@ -96,6 +96,7 @@ const seedRunningTurn = Effect.fn("rolesTest.seedRunningTurn")(function* (
   threadId: string,
   model: string,
   state: string,
+  instanceId: string = "claudeAgent",
 ) {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`
@@ -105,7 +106,7 @@ const seedRunningTurn = Effect.fn("rolesTest.seedRunningTurn")(function* (
       pending_user_input_count, has_actionable_proposed_plan, model_selection_json
     ) VALUES (
       ${threadId}, 'project-roles-test', ${"Seed " + threadId}, '2026-09-21T00:00:00.000Z', '2026-09-21T00:00:00.000Z',
-      'full-access', 'default', 0, 0, 0, ${JSON.stringify({ instanceId: "claudeAgent", model })}
+      'full-access', 'default', 0, 0, 0, ${JSON.stringify({ instanceId, model })}
     )
   `;
   yield* sql`
@@ -309,6 +310,25 @@ describe("OrchestrationRoles load-aware placement", () => {
       // crusoe-7 reads 2 (flash + deep alias), crusoe-2 reads 0.
       const resolved = yield* roles.resolve("implement");
       assert.strictEqual(resolved.model, "glm-5.3-flash-c2");
+    }).pipe(Effect.provide(rolesLayer)),
+  );
+
+  it.effect("scopes load to the role's provider instance", () =>
+    Effect.gen(function* () {
+      // Another instance serves the same slugs and is saturated on the head
+      // candidate. A slug-only load query would see that load and move this
+      // role off its head; the routing instanceId is part of the key, so the
+      // role's own instance reads flash=0 and c2=1 and the head wins.
+      yield* writeRolesFile(CANDIDATE_ROLES_JSON);
+      yield* seedRunningTurn("t-open-a", "glm-5.3-flash", "running", "opencode");
+      yield* seedRunningTurn("t-open-b", "glm-5.3-flash", "running", "opencode");
+      yield* seedRunningTurn("t-open-c", "glm-5.3-flash", "running", "opencode");
+      yield* seedRunningTurn("t-open-d", "glm-5.3-flash", "running", "opencode");
+      yield* seedRunningTurn("t-open-e", "glm-5.3-flash", "running", "opencode");
+      yield* seedRunningTurn("t-c2-a", "glm-5.3-flash-c2", "running");
+      const roles = yield* OrchestrationRoles;
+      const resolved = yield* roles.resolve("implement");
+      assert.strictEqual(resolved.model, "glm-5.3-flash");
     }).pipe(Effect.provide(rolesLayer)),
   );
 

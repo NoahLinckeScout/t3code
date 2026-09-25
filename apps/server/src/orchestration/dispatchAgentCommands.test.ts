@@ -320,6 +320,54 @@ describe("agent.* dispatch commands (real engine + sqlite)", () => {
   );
 
   it.effect(
+    "resumes a pending delegation with the model the row recorded, not a fresh role resolution",
+    () =>
+      Effect.gen(function* () {
+        yield* writeRolesFixture();
+        yield* seedParentThread("spawn-resume");
+
+        // Simulate the crash window insertPending covers: the row exists and
+        // names its child, but thread.create was never dispatched. The
+        // recorded model is deliberately NOT what the role resolves to now.
+        const childThreadId = "spawn-resume-child";
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`
+          INSERT INTO orchestration_delegations (
+            delegation_id, parent_thread_id, child_thread_id, role, provider_instance_id,
+            model, state, objective, judgment, resource_lease, idempotency_key,
+            spawn_command_id, spawn_sequence, handoff_json, deadline_at, alerted_at,
+            created_at, updated_at
+          ) VALUES (
+            'dlg_spawn-resume', ${PARENT_THREAD}, ${childThreadId}, 'research', 'opencode',
+            'self-hosted-glm/glm-4.5-air', 'pending', 'Rebuild the projection indexes',
+            'Whether a rebuild or a targeted patch is correct', NULL, 'idem-spawn-resume',
+            'delegation:dlg_spawn-resume:thread-create', NULL, NULL, NULL, NULL,
+            '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+          )
+        `;
+
+        const dispatchService = yield* ClientOrchestrationCommandDispatch;
+        const result = yield* dispatchService.dispatch({
+          ...spawnCommand({ objective: "Rebuild the projection indexes" }),
+          idempotencyKey: "idem-spawn-resume",
+        });
+        assert.isAtLeast(result.sequence, 1);
+
+        const childRows = yield* sql<DispatchRow>`
+          SELECT model_selection_json AS "modelSelectionJson"
+          FROM projection_threads
+          WHERE thread_id = ${childThreadId}
+        `;
+        assert.strictEqual(childRows.length, 1);
+        // The retry dispatched the recorded placement. Re-resolving the role
+        // (load-aware or not) would have sent the child to a model the
+        // delegation row never named.
+        const childModelSelection = yield* decodeModelSelection(childRows[0]!.modelSelectionJson);
+        assert.strictEqual(childModelSelection.model, "self-hosted-glm/glm-4.5-air");
+      }).pipe(Effect.provide(dispatchSystemLayer)),
+  );
+
+  it.effect(
     "spawns a catalog model that is not a named role onto the child's real modelSelection",
     () =>
       Effect.gen(function* () {
