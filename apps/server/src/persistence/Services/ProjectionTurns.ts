@@ -74,9 +74,15 @@ export type ProjectionTurnById = typeof ProjectionTurnById.Type;
  *
  * This is not a work queue, and the difference has already caused one defect.
  * The row is created for every accepted `thread.turn-start-requested`,
- * including the one that immediately becomes the running turn, and it is
- * removed only when the session goes `running` with an `activeTurnId` (the
- * turn genuinely starting) or when the session reaches a terminal status.
+ * including the one that immediately becomes the running turn.
+ * `applyThreadTurnsProjection` clears it in more cases than the turn
+ * starting: the session goes `running` with an `activeTurnId` (the turn
+ * genuinely starting); the session reaches a terminal status (`error`,
+ * `stopped`, `interrupted`); a `context-compaction` or
+ * `provider.turn.start.failed` activity arrives naming the row's message; or
+ * a provider-generated session reset (`server:provider-session-set:`) reports
+ * `ready`. A missing row is therefore not proof the turn ran, and a present
+ * row still means only "accepted, never observed running".
  *
  * So its presence conflates two states that look identical from here:
  *
