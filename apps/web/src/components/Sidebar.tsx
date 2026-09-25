@@ -2497,6 +2497,11 @@ export default function Sidebar() {
   // lifecycle command and any order-key writes. The next pickup waits for
   // this hold so a second drop cannot replace an unconfirmed placement.
   const [optimisticDrop, setOptimisticDrop] = useState<SidebarOptimisticDrop | null>(null);
+  // True while a drop's write loop is still issuing commands. Independent of
+  // the preview hold: the landing grace releases the preview after 5s, but
+  // late writes from a slow dispatch can still interleave with a newer drag,
+  // so dragging stays locked until the loop finishes either way.
+  const [dropWritesInFlight, setDropWritesInFlight] = useState(false);
   const {
     pinnedThreads,
     draggableThreadKeys,
@@ -3523,6 +3528,7 @@ export default function Sidebar() {
         assignedKeys: new Map(assignments.map(({ id, orderKey }) => [id, orderKey])),
       };
       setOptimisticDrop(drop);
+      setDropWritesInFlight(true);
       void (async () => {
         const run = async (
           operation: Promise<AtomCommandResult<unknown, unknown>>,
@@ -3599,7 +3605,7 @@ export default function Sidebar() {
           )
             return;
         }
-      })();
+      })().finally(() => setDropWritesInFlight(false));
     },
     [
       activeKeysById,
@@ -4682,7 +4688,9 @@ export default function Sidebar() {
                             key={threadKey}
                             id={threadKey}
                             disabled={
-                              !draggableThreadKeys.has(threadKey) || optimisticDrop !== null
+                              !draggableThreadKeys.has(threadKey) ||
+                              optimisticDrop !== null ||
+                              dropWritesInFlight
                             }
                           >
                             {(bag) => renderThreadRowInner(thread, section, bag)}
