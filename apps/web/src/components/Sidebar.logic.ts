@@ -352,6 +352,107 @@ export function applySidebarThreadDrop<
   };
 }
 
+/** Keep a dropped row at its destination while its server applies the
+ * lifecycle command and any order-key writes. The next pickup waits for
+ * this hold so a second drop cannot replace an unconfirmed placement. */
+export type SidebarOptimisticDrop = {
+  readonly key: string;
+  readonly sourceSection: SidebarSection;
+  readonly section: "pinned" | "active" | "settled";
+  readonly occurredAt: string;
+  readonly clearsSnooze: boolean;
+  /** Full destination order for pinned and active drops. */
+  readonly order: readonly string[] | null;
+  /** Destination order keys before the drop, to recognize concurrent writes. */
+  readonly keysAtDrop: ReadonlyMap<string, string | null>;
+  /** The keys this drop writes (one per planned assignment). The
+      override holds until all of them appear in canonical state. */
+  readonly assignedKeys: ReadonlyMap<string, string>;
+};
+
+/** How long a drag preview may keep a row against canonical data while its
+ * writes land. Commands normally settle well inside this window; the grace
+ * exists for dispatches that never settle at all (hung transport, a server
+ * lost mid-request), which would otherwise hold a phantom placement — a pin
+ * that never landed, rendered as pinned — until reload. */
+export const SIDEBAR_DROP_LAND_GRACE_MS = 5_000;
+
+export function isSidebarThreadDropStale(
+  drop: Pick<SidebarOptimisticDrop, "occurredAt">,
+  now: string,
+): boolean {
+  const ageMs = Date.parse(now) - Date.parse(drop.occurredAt);
+  return !Number.isNaN(ageMs) && ageMs >= SIDEBAR_DROP_LAND_GRACE_MS;
+}
+
+export type SidebarDropReconciliationThread = {
+  readonly archivedAt: string | null;
+  readonly snoozedUntil?: string | null | undefined;
+  readonly pinOrderKey?: string | null | undefined;
+  readonly activeOrderKey?: string | null | undefined;
+};
+
+/** Whether an in-flight drag preview should release the row back to
+ * canonical data ("clear") or keep holding it ("hold"). Mirrors the
+ * server's landing sequence: the section move, then the snooze clear, then
+ * the order-key assignments. A drop older than the landing grace always
+ * releases — a write that actually landed reasserts itself via its
+ * arriving event, so a stale hold can only ever be a phantom. */
+export function reconcileSidebarThreadDrop(input: {
+  readonly drop: SidebarOptimisticDrop;
+  readonly canonicalByKey: ReadonlyMap<string, SidebarDropReconciliationThread>;
+  readonly canonicalSection: SidebarSection;
+  readonly destinationKeys: readonly string[];
+  readonly now: string;
+}): "clear" | "hold" {
+  const { drop } = input;
+  if (isSidebarThreadDropStale(drop, input.now)) return "clear";
+  const thread = input.canonicalByKey.get(drop.key);
+  if (thread === undefined || thread.archivedAt !== null) return "clear";
+  const canonicalSection = input.canonicalSection;
+  if (canonicalSection !== drop.sourceSection && canonicalSection !== drop.section) {
+    return "clear";
+  }
+  if (drop.order === null) {
+    // Settle emits unsnooze for snoozed rows but no longer unpins: a pin
+    // survives the settle (it re-emerges on unsettle). Wait for the
+    // section move — and the snooze clear where one is pending — before
+    // releasing the projected fields and sort timestamps.
+    if (canonicalSection === drop.section && (!drop.clearsSnooze || thread.snoozedUntil == null)) {
+      return "clear";
+    }
+    return "hold";
+  }
+  if (canonicalSection !== drop.section) return "hold";
+  if (drop.clearsSnooze && thread.snoozedUntil != null) return "hold";
+  const destinationKeys = input.destinationKeys;
+  const canonicalDestination = destinationKeys.flatMap((key) => {
+    const canonical = input.canonicalByKey.get(key);
+    return canonical === undefined ? [] : [[key, canonical] as const];
+  });
+  const keyByThread = new Map(
+    canonicalDestination.map(([key, thread]) => [
+      key,
+      (drop.section === "pinned" ? thread.pinOrderKey : thread.activeOrderKey) ?? null,
+    ]),
+  );
+  const heldOrder = drop.order;
+  const heldKeys = new Set(heldOrder);
+  const membershipChanged =
+    destinationKeys.length !== heldOrder.length ||
+    destinationKeys.some((key) => !heldKeys.has(key));
+  const foreignKeyLanded = destinationKeys.some((key) => {
+    const currentKey = keyByThread.get(key) ?? null;
+    if (currentKey === (drop.keysAtDrop.get(key) ?? null)) return false;
+    return currentKey !== drop.assignedKeys.get(key);
+  });
+  const allAssignmentsLanded = [...drop.assignedKeys].every(
+    ([threadKey, orderKey]) => keyByThread.get(threadKey) === orderKey,
+  );
+  if (membershipChanged || foreignKeyLanded || allAssignmentsLanded) return "clear";
+  return "hold";
+}
+
 type SidebarProject = {
   id: string;
   title: string;

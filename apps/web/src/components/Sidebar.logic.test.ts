@@ -22,6 +22,7 @@ import {
   isSidebarNestedLinkClick,
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
+  reconcileSidebarThreadDrop,
   resolveProjectStatusIndicator,
   resolveThreadRowClassName,
   resolveSidebarThreadStatus,
@@ -44,9 +45,12 @@ import {
   sortProjectsForSidebar,
   sortScopedProjectsForSidebar,
   shouldCreateNewThreadInCurrentProject,
+  SIDEBAR_DROP_LAND_GRACE_MS,
   THREAD_JUMP_HINT_SHOW_DELAY_MS,
+  type SidebarDropReconciliationThread,
   type SidebarListItem,
   type SidebarListMarker,
+  type SidebarOptimisticDrop,
   type SidebarSection,
   resolveSidebarDropVerb,
 } from "./Sidebar.logic";
@@ -2497,5 +2501,186 @@ describe("resolveSidebarDropVerb", () => {
     expect(resolveSidebarDropVerb("pinned", "pinned")).toBeNull();
     expect(resolveSidebarDropVerb("active", null)).toBeNull();
     expect(resolveSidebarDropVerb("active", "snoozed")).toBeNull();
+  });
+});
+
+describe("reconcileSidebarThreadDrop", () => {
+  const now = "2026-01-01T00:00:00.000Z";
+  const before = "2025-12-31T23:59:00.000Z";
+
+  const row = (
+    overrides?: Partial<SidebarDropReconciliationThread>,
+  ): SidebarDropReconciliationThread => ({
+    archivedAt: null,
+    snoozedUntil: null,
+    pinOrderKey: null,
+    activeOrderKey: null,
+    ...overrides,
+  });
+
+  const drop = (overrides?: Partial<SidebarOptimisticDrop>): SidebarOptimisticDrop => ({
+    key: "env:t1",
+    sourceSection: "active",
+    section: "pinned",
+    occurredAt: now,
+    clearsSnooze: true,
+    order: ["env:t1", "env:t2"],
+    keysAtDrop: new Map([
+      ["env:t1", null],
+      ["env:t2", "a"],
+    ]),
+    assignedKeys: new Map([
+      ["env:t1", "z"],
+      ["env:t2", "a"],
+    ]),
+    ...overrides,
+  });
+
+  const canonical = (rows: Record<string, SidebarDropReconciliationThread>) =>
+    new Map(Object.entries(rows));
+
+  const pinnedDestination = ["env:t1", "env:t2"];
+
+  it("holds a fresh pin drop while the row is still canonically active", () => {
+    expect(
+      reconcileSidebarThreadDrop({
+        drop: drop(),
+        canonicalByKey: canonical({ "env:t1": row() }),
+        canonicalSection: "active",
+        destinationKeys: pinnedDestination,
+        now,
+      }),
+    ).toBe("hold");
+  });
+
+  it("releases a landed pin once its assignments appear in canonical state", () => {
+    expect(
+      reconcileSidebarThreadDrop({
+        drop: drop(),
+        canonicalByKey: canonical({
+          "env:t1": row({ pinOrderKey: "z" }),
+          "env:t2": row({ pinOrderKey: "a" }),
+        }),
+        canonicalSection: "pinned",
+        destinationKeys: pinnedDestination,
+        now,
+      }),
+    ).toBe("clear");
+  });
+
+  it("releases when the canonical row vanishes or archives", () => {
+    expect(
+      reconcileSidebarThreadDrop({
+        drop: drop(),
+        canonicalByKey: canonical({}),
+        canonicalSection: "active",
+        destinationKeys: pinnedDestination,
+        now,
+      }),
+    ).toBe("clear");
+    expect(
+      reconcileSidebarThreadDrop({
+        drop: drop(),
+        canonicalByKey: canonical({ "env:t1": row({ archivedAt: before }) }),
+        canonicalSection: "active",
+        destinationKeys: pinnedDestination,
+        now,
+      }),
+    ).toBe("clear");
+  });
+
+  it("releases when the canonical section matches neither the source nor the destination", () => {
+    expect(
+      reconcileSidebarThreadDrop({
+        drop: drop(),
+        canonicalByKey: canonical({ "env:t1": row() }),
+        canonicalSection: "snoozed",
+        destinationKeys: pinnedDestination,
+        now,
+      }),
+    ).toBe("clear");
+  });
+
+  it("holds a settle preview until the section move and snooze clear land", () => {
+    const settleDrop = drop({
+      sourceSection: "active",
+      section: "settled",
+      order: null,
+      clearsSnooze: true,
+      keysAtDrop: new Map(),
+      assignedKeys: new Map(),
+    });
+    expect(
+      reconcileSidebarThreadDrop({
+        drop: settleDrop,
+        canonicalByKey: canonical({ "env:t1": row({ snoozedUntil: "2026-01-02T00:00:00.000Z" }) }),
+        canonicalSection: "settled",
+        destinationKeys: [],
+        now,
+      }),
+    ).toBe("hold");
+    expect(
+      reconcileSidebarThreadDrop({
+        drop: settleDrop,
+        canonicalByKey: canonical({ "env:t1": row() }),
+        canonicalSection: "settled",
+        destinationKeys: [],
+        now,
+      }),
+    ).toBe("clear");
+  });
+
+  it("releases a pin drop held against an active canonical row past the landing grace", () => {
+    const stale = drop({ occurredAt: "2025-12-31T23:59:54.000Z" });
+    expect(
+      reconcileSidebarThreadDrop({
+        drop: stale,
+        canonicalByKey: canonical({ "env:t1": row() }),
+        canonicalSection: "active",
+        destinationKeys: pinnedDestination,
+        now,
+      }),
+    ).toBe("clear");
+  });
+
+  it("releases a stale drop even when its section matches the canonical data", () => {
+    // The assignments never landed: without the grace this hold would keep a
+    // phantom pin rendered indefinitely.
+    const stale = drop({ occurredAt: "2025-12-31T23:59:54.000Z" });
+    expect(
+      reconcileSidebarThreadDrop({
+        drop: stale,
+        canonicalByKey: canonical({ "env:t1": row({ pinOrderKey: "q" }) }),
+        canonicalSection: "pinned",
+        destinationKeys: pinnedDestination,
+        now,
+      }),
+    ).toBe("clear");
+  });
+
+  it("keeps holding inside the landing grace window", () => {
+    const fresh = drop({ occurredAt: "2025-12-31T23:59:59.000Z" });
+    expect(Date.parse(now) - Date.parse(fresh.occurredAt)).toBeLessThan(SIDEBAR_DROP_LAND_GRACE_MS);
+    expect(
+      reconcileSidebarThreadDrop({
+        drop: fresh,
+        canonicalByKey: canonical({ "env:t1": row() }),
+        canonicalSection: "active",
+        destinationKeys: pinnedDestination,
+        now,
+      }),
+    ).toBe("hold");
+  });
+
+  it("treats an unparseable drop time as fresh rather than stale", () => {
+    expect(
+      reconcileSidebarThreadDrop({
+        drop: drop({ occurredAt: "not-a-timestamp" }),
+        canonicalByKey: canonical({ "env:t1": row() }),
+        canonicalSection: "active",
+        destinationKeys: pinnedDestination,
+        now,
+      }),
+    ).toBe("hold");
   });
 });
