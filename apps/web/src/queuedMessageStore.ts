@@ -171,13 +171,29 @@ export function joinRestoredQueuedPrompts(
   currentPrompt: string,
   messages: ReadonlyArray<{ readonly prompt: string }>,
   position: "append" | "prepend" = "append",
+  boundary?: string,
 ): string {
   const restored = messages
     .map((message) => message.prompt.trim())
     .filter((prompt) => prompt.length > 0);
   const current = currentPrompt.trim();
-  const parts = position === "prepend" ? [...restored, current] : [current, ...restored];
-  return parts.filter((prompt) => prompt.length > 0).join("\n\n");
+  if (position === "prepend") {
+    // The taken message was queued before anything Stop restored, but not
+    // before prose the user typed while its send was uploading. Insert after
+    // the composer value Stop started from (`boundary`); when the composer no
+    // longer starts with it — the user edited the draft since — the user has
+    // taken over the text and the late message appends instead of
+    // displacing prose.
+    const prefix = boundary?.trim() ?? "";
+    const remainder =
+      prefix.length > 0 && current.startsWith(prefix)
+        ? current.slice(prefix.length).replace(/^\n\n+/, "")
+        : undefined;
+    const parts =
+      remainder === undefined ? [current, ...restored] : [prefix, ...restored, remainder];
+    return parts.filter((prompt) => prompt.length > 0).join("\n\n");
+  }
+  return [current, ...restored].filter((prompt) => prompt.length > 0).join("\n\n");
 }
 
 /**

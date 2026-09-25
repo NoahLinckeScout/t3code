@@ -133,16 +133,37 @@ describe("joinRestoredQueuedPrompts", () => {
     ).toBe("current draft\n\nfirst\n\nsecond");
   });
 
-  it("prepends a late-restored taken message ahead of already-restored text", () => {
-    // Stop restored the younger queued message first; the taken (older) one
-    // re-enters ahead of it so the composer reads in queue order.
+  it("appends when no drain boundary was recorded (cannot tell draft from restored text)", () => {
+    // Without the boundary recorded at Stop time the helper cannot tell the
+    // user's own prose from Stop-restored text, so it appends rather than
+    // displacing either.
     expect(
       joinRestoredQueuedPrompts("younger queued", [{ prompt: "older taken" }], "prepend"),
-    ).toBe("older taken\n\nyounger queued");
+    ).toBe("younger queued\n\nolder taken");
   });
 
   it("returns only the restored text when the draft is empty", () => {
     expect(joinRestoredQueuedPrompts("   ", [{ prompt: "solo" }], "prepend")).toBe("solo");
+  });
+
+  it("inserts a late restore after the user's draft via the drain boundary", () => {
+    // Draft C was typed while A's send was uploading; Stop restored B after C;
+    // A arrives late and must land between C and B.
+    expect(joinRestoredQueuedPrompts("C\n\nB", [{ prompt: "A" }], "prepend", "C")).toBe(
+      "C\n\nA\n\nB",
+    );
+  });
+
+  it("keeps the drain boundary when Stop restored nothing yet", () => {
+    expect(joinRestoredQueuedPrompts("C", [{ prompt: "A" }], "prepend", "C")).toBe("C\n\nA");
+  });
+
+  it("appends instead of displacing prose edited after the drain", () => {
+    // The user rewrote the draft after Stop; the boundary no longer matches,
+    // so the late message goes last rather than splitting their text.
+    expect(joinRestoredQueuedPrompts("wholly new draft", [{ prompt: "A" }], "prepend", "C")).toBe(
+      "wholly new draft\n\nA",
+    );
   });
 });
 
