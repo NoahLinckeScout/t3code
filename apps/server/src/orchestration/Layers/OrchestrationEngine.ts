@@ -37,6 +37,7 @@ import {
   OrchestrationCommandIdConflictError,
   OrchestrationCommandInvariantError,
   OrchestrationCommandPreviouslyRejectedError,
+  OrchestrationEngineInternalError,
   type OrchestrationDispatchError,
   type OrchestrationProjectorDecodeError,
 } from "../Errors.ts";
@@ -270,7 +271,9 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           Effect.mapError((cause) =>
             isOrchestrationCommandRejection(cause)
               ? cause
-              : new OrchestrationCommandInvariantError({
+              : // Server-side failure, not a client refusal: it must not
+                // classify as a 400 rejection nor record a rejection receipt.
+                new OrchestrationEngineInternalError({
                   commandType: envelope.command.type,
                   detail: "Failed to generate an event identifier.",
                   cause,
@@ -304,7 +307,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
 
               const lastSavedEvent = committedEvents.at(-1) ?? null;
               if (lastSavedEvent === null) {
-                return yield* new OrchestrationCommandInvariantError({
+                return yield* new OrchestrationEngineInternalError({
                   commandType: envelope.command.type,
                   detail: "Command produced no events.",
                 });

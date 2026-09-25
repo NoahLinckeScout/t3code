@@ -24,6 +24,20 @@ import {
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
 
+/**
+ * Map a dispatch failure to its HTTP error shape. A refused command — an
+ * invariant refusal, a settle blocked by pending work, or an idempotent retry
+ * of a previously refused command — is the client's fault and answers 400 with
+ * the refusal's own text. Anything else (engine-internal failures, projection
+ * errors, conflicts) keeps the generic 500.
+ */
+export const classifyDispatchFailure = (
+  cause: unknown,
+): Effect.Effect<never, EnvironmentInternalError | EnvironmentRequestInvalidError> =>
+  isOrchestrationCommandRejection(cause)
+    ? failEnvironmentInvalidRequest("invalid_command", cause.message)
+    : failEnvironmentInternal("orchestration_dispatch_failed", cause);
+
 export const orchestrationHttpApiLayer = HttpApiBuilder.group(
   EnvironmentHttpApi,
   "orchestration",
@@ -139,17 +153,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
               // with the precise 400 the decider's detail names instead of the
               // generic 500, which hides "Thread 'X' already exists and cannot
               // be created twice." behind orchestration_dispatch_failed.
-              Effect.catch(
-                (
-                  cause,
-                ): Effect.Effect<
-                  never,
-                  EnvironmentInternalError | EnvironmentRequestInvalidError
-                > =>
-                  isOrchestrationCommandRejection(cause)
-                    ? failEnvironmentInvalidRequest("invalid_command", cause.message)
-                    : failEnvironmentInternal("orchestration_dispatch_failed", cause),
-              ),
+              Effect.catch(classifyDispatchFailure),
             );
           yield* ProjectCloneTracker.discardCloneForDeletedProject(
             projectCloneTracker,
