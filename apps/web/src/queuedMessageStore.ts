@@ -38,11 +38,13 @@ export interface QueuedComposerMessage {
 interface QueuedMessageStoreState {
   queuesByThreadKey: Record<string, QueuedComposerMessage[]>;
   /**
-   * Bumped by `drain`. A send that took a message before a drain and finishes
-   * its upload after it compares this to the value it captured and gives up,
-   * so Stop cannot be followed by a queued message starting a new turn.
+   * Bumped by `drain`, per thread. A send that took a message before a drain
+   * and finishes its upload after it compares its thread's value to the one it
+   * captured and gives up, so Stop cannot be followed by a queued message
+   * starting a new turn. Keyed by thread because drains are per thread: a Stop
+   * on thread B must not cancel thread A's in-flight queued send.
    */
-  drainGeneration: number;
+  drainGenerationsByThreadKey: Record<string, number>;
   enqueue: (threadKey: string, message: Omit<QueuedComposerMessage, "id">) => QueuedComposerMessage;
   /**
    * Removes one message and returns it, or null when another caller already
@@ -70,7 +72,7 @@ const EMPTY_QUEUE: QueuedComposerMessage[] = [];
 /** In-memory only: a queued message is a live intent, not a draft worth persisting. */
 export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get) => ({
   queuesByThreadKey: {},
-  drainGeneration: 0,
+  drainGenerationsByThreadKey: {},
   enqueue: (threadKey, message) => {
     const entry: QueuedComposerMessage = { ...message, id: randomUUID() };
     set((state) => ({
@@ -146,11 +148,53 @@ export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get
     set((state) => {
       const queuesByThreadKey = { ...state.queuesByThreadKey };
       delete queuesByThreadKey[threadKey];
-      return { queuesByThreadKey, drainGeneration: state.drainGeneration + 1 };
+      return {
+        queuesByThreadKey,
+        drainGenerationsByThreadKey: {
+          ...state.drainGenerationsByThreadKey,
+          [threadKey]: (state.drainGenerationsByThreadKey[threadKey] ?? 0) + 1,
+        },
+      };
     });
     return queue;
   },
 }));
+
+/**
+ * Join restored queued prompts into the composer draft. `position` matters
+ * when a message that was already taken for its send is restored late — after
+ * Stop has already restored the messages that were still queued. The taken
+ * message was queued before them, so it belongs before their text, not
+ * appended after it.
+ */
+export function joinRestoredQueuedPrompts(
+  currentPrompt: string,
+  messages: ReadonlyArray<{ readonly prompt: string }>,
+  position: "append" | "prepend" = "append",
+  boundary?: string,
+): string {
+  const restored = messages
+    .map((message) => message.prompt.trim())
+    .filter((prompt) => prompt.length > 0);
+  const current = currentPrompt.trim();
+  if (position === "prepend") {
+    // The taken message was queued before anything Stop restored, but not
+    // before prose the user typed while its send was uploading. Insert after
+    // the composer value Stop started from (`boundary`); when the composer no
+    // longer starts with it — the user edited the draft since — the user has
+    // taken over the text and the late message appends instead of
+    // displacing prose.
+    const prefix = boundary?.trim() ?? "";
+    const remainder =
+      prefix.length > 0 && current.startsWith(prefix)
+        ? current.slice(prefix.length).replace(/^\n\n+/, "")
+        : undefined;
+    const parts =
+      remainder === undefined ? [current, ...restored] : [prefix, ...restored, remainder];
+    return parts.filter((prompt) => prompt.length > 0).join("\n\n");
+  }
+  return [current, ...restored].filter((prompt) => prompt.length > 0).join("\n\n");
+}
 
 /**
  * The newest finished tool call. Its id changing is the boundary a queued

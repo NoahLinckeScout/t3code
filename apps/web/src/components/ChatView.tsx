@@ -312,6 +312,7 @@ import {
 } from "../lib/composerContextRecords";
 import {
   isQueuedMessageDue,
+  joinRestoredQueuedPrompts,
   latestCompletedToolActivityId,
   type QueuedComposerMessage,
   useQueuedMessages,
@@ -3915,9 +3916,12 @@ export default function ChatView(props: ChatViewProps) {
 
   const interruptContextRef = useRef({ activeThread, phase, setThreadError });
   interruptContextRef.current = { activeThread, phase, setThreadError };
-  const restoreQueuedMessagesRef = useRef<(messages: ReadonlyArray<QueuedComposerMessage>) => void>(
-    () => {},
-  );
+  const restoreQueuedMessagesRef = useRef<
+    (
+      messages: ReadonlyArray<QueuedComposerMessage>,
+      position?: "append" | "prepend" | "drain-restore",
+    ) => void
+  >(() => {});
   const onInterrupt = useCallback(async () => {
     const { activeThread, phase, setThreadError } = interruptContextRef.current;
     const input = buildRunningThreadTurnInterruptInput(activeThread, phase);
@@ -3926,6 +3930,7 @@ export default function ChatView(props: ChatViewProps) {
       useQueuedMessageStore
         .getState()
         .drain(scopedThreadKey(scopeThreadRef(activeThread.environmentId, activeThread.id))),
+      "drain-restore",
     );
     const result = await interruptThreadTurn({
       environmentId: activeThread.environmentId,
@@ -7105,12 +7110,24 @@ export default function ChatView(props: ChatViewProps) {
   const queuedMessages = useQueuedMessages(activeThreadKey ?? "");
   // Puts queued messages back into the composer, e.g. after Stop or a failed
   // send. Prompts join with blank lines; attachments and contexts are added.
-  const restoreQueuedMessagesToComposer = (messages: ReadonlyArray<QueuedComposerMessage>) => {
+  // "drain-restore" is Stop's own restore: it records the composer value it
+  // started from so a late-restored taken message can insert after the user's
+  // pre-existing draft instead of before it.
+  const queueDrainBoundaryRef = useRef<string | undefined>(undefined);
+  const restoreQueuedMessagesToComposer = (
+    messages: ReadonlyArray<QueuedComposerMessage>,
+    position: "append" | "prepend" | "drain-restore" = "append",
+  ) => {
     if (messages.length === 0) return;
-    const prompts = [promptRef.current, ...messages.map((message) => message.prompt)]
-      .map((prompt) => prompt.trim())
-      .filter((prompt) => prompt.length > 0);
-    const nextPrompt = prompts.join("\n\n");
+    if (position === "drain-restore") {
+      queueDrainBoundaryRef.current = promptRef.current;
+    }
+    const nextPrompt = joinRestoredQueuedPrompts(
+      promptRef.current,
+      messages,
+      position === "drain-restore" ? "append" : position,
+      queueDrainBoundaryRef.current,
+    );
     promptRef.current = nextPrompt;
     setComposerDraftPrompt(composerDraftTarget, nextPrompt);
     // The draft store silently drops attachments over the per-turn cap. Split
@@ -7641,7 +7658,9 @@ export default function ChatView(props: ChatViewProps) {
     // Stop drains the queue. A queued send whose upload was still running at
     // that moment must not start a turn afterwards; it checks this before
     // dispatch and hands the message back to the composer instead.
-    const drainGenerationAtTake = useQueuedMessageStore.getState().drainGeneration;
+    const drainGenerationAtTake = activeThreadKey
+      ? (useQueuedMessageStore.getState().drainGenerationsByThreadKey[activeThreadKey] ?? 0)
+      : 0;
     // A queued send that fails goes back to the head of the queue, held. The
     // messages behind it keep their order and wait; the composer is not
     // touched, which also keeps a failure after navigation off the new
@@ -7688,10 +7707,14 @@ export default function ChatView(props: ChatViewProps) {
 
     if (
       queuedMessage &&
-      useQueuedMessageStore.getState().drainGeneration !== drainGenerationAtTake
+      (useQueuedMessageStore.getState().drainGenerationsByThreadKey[activeThreadKey ?? ""] ?? 0) !==
+        drainGenerationAtTake
     ) {
       sendInFlightRef.current = false;
-      restoreQueuedMessagesToComposer([queuedMessage]);
+      // The taken message was queued before anything Stop restored, so it
+      // re-enters the composer ahead of their text — but after any draft the
+      // user typed while the send was uploading (the recorded drain boundary).
+      restoreQueuedMessagesToComposer([queuedMessage], "prepend");
       return;
     }
 
