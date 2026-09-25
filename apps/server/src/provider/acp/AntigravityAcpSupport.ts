@@ -37,6 +37,12 @@ export interface AntigravityAcpRuntimeInput extends Omit<
 > {
   /** Device CLI environment supplied for this provider session. */
   readonly agentDeviceEnvironment?: Readonly<Record<string, string>>;
+  /**
+   * The session's own t3 thread id. Chat sessions stamp it so subprocesses the
+   * model spawns can attribute writes and arm watchers; setup, probe, and
+   * text-generation runtimes leave it off — they are not a thread's session.
+   */
+  readonly threadId?: string;
   readonly childProcessSpawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly onAuthorizationUrl?: (url: string) => Effect.Effect<void, EffectAcpErrors.AcpError>;
   /**

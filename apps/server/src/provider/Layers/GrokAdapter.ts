@@ -995,14 +995,15 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
           const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
           const acp = yield* makeGrokAcpRuntime({
             grokSettings,
-            ...(options?.environment || mcpSession?.agentDeviceEnvironment
-              ? {
-                  environment: McpProviderSession.withAgentDeviceEnvironment(
-                    options?.environment ?? process.env,
-                    mcpSession,
-                  ),
-                }
-              : {}),
+            // The thread identity rides the spawned CLI's environment in every
+            // case — not only when an MCP session or device shim exists — so
+            // subprocesses the model spawns can attribute writes and arm
+            // watchers (same guarantee the Claude adapter stamps in).
+            environment: McpProviderSession.withAgentDeviceEnvironment(
+              options?.environment ?? process.env,
+              mcpSession,
+              { threadId: input.threadId },
+            ),
             childProcessSpawner,
             cwd,
             runtimeMode: input.runtimeMode,
