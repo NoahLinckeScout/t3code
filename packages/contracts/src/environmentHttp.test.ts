@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
+import * as Schema from "effect/Schema";
 
 import {
   EnvironmentAuthInvalidError,
@@ -58,5 +59,33 @@ describe("environment HTTP errors", () => {
     errors.forEach((error, index) => {
       expect(error.message).toContain(details[index]);
     });
+  });
+
+  // The dispatch route surfaces a refused command (invariant refusal, blocked
+  // settle) as this error with the refusal's own text; the optional detail must
+  // survive the JSON round trip a client performs and stay absent when unset.
+  it("EnvironmentRequestInvalidError round-trips an optional detail", () => {
+    const withDetail = new EnvironmentRequestInvalidError({
+      code: "invalid_request",
+      reason: "invalid_command",
+      traceId,
+      detail: "Thread 'abc' already exists and cannot be created twice.",
+    });
+    expect(withDetail.message).toContain("already exists and cannot be created twice");
+
+    const encoded = JSON.parse(
+      JSON.stringify(Schema.encodeUnknownSync(EnvironmentRequestInvalidError)(withDetail)),
+    );
+    const decoded = Schema.decodeUnknownSync(EnvironmentRequestInvalidError)(encoded);
+    expect(decoded.detail).toBe("Thread 'abc' already exists and cannot be created twice.");
+
+    const withoutDetail = Schema.decodeUnknownSync(EnvironmentRequestInvalidError)({
+      _tag: "EnvironmentRequestInvalidError",
+      code: "invalid_request",
+      reason: "invalid_command",
+      traceId,
+    });
+    expect(withoutDetail.detail).toBeUndefined();
+    expect(withoutDetail.message).toBe("The environment rejected the request (invalid_command).");
   });
 });

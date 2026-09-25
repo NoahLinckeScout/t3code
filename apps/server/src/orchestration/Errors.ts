@@ -52,13 +52,6 @@ export class OrchestrationThreadSettleBlockedError extends Schema.TaggedError<Or
   }
 }
 
-export const OrchestrationCommandRejection = Schema.Union([
-  OrchestrationCommandInvariantError,
-  OrchestrationThreadSettleBlockedError,
-]);
-export type OrchestrationCommandRejection = typeof OrchestrationCommandRejection.Type;
-export const isOrchestrationCommandRejection = Schema.is(OrchestrationCommandRejection);
-
 export class OrchestrationCommandPreviouslyRejectedError extends Schema.TaggedError<OrchestrationCommandPreviouslyRejectedError>()(
   "OrchestrationCommandPreviouslyRejectedError",
   {
@@ -71,6 +64,39 @@ export class OrchestrationCommandPreviouslyRejectedError extends Schema.TaggedEr
     return `Command previously rejected (${this.commandId}): ${this.detail}`;
   }
 }
+
+/**
+ * An engine-side failure (event identifier generation, a command that somehow
+ * produced no events) that happens to surface through the same dispatch path
+ * as client refusals. It is deliberately NOT part of `OrchestrationCommandRejection`:
+ * these are server faults, so the HTTP mapping keeps them as 500s and the
+ * engine records no rejection receipt — a retry should retry, not replay a
+ * refusal the client never caused.
+ */
+export class OrchestrationEngineInternalError extends Schema.TaggedError<OrchestrationEngineInternalError>()(
+  "OrchestrationEngineInternalError",
+  {
+    commandType: Schema.String,
+    detail: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return `Orchestration engine failed internally (${this.commandType}): ${this.detail}`;
+  }
+}
+
+export const OrchestrationCommandRejection = Schema.Union([
+  OrchestrationCommandInvariantError,
+  OrchestrationThreadSettleBlockedError,
+  // An idempotent retry of a refused command replays the persisted rejection
+  // receipt as this error. It is the same refusal the first attempt saw, so
+  // consumers that classify rejections (the dispatch HTTP 400 mapping) must
+  // classify the replay identically instead of falling back to a 500.
+  OrchestrationCommandPreviouslyRejectedError,
+]);
+export type OrchestrationCommandRejection = typeof OrchestrationCommandRejection.Type;
+export const isOrchestrationCommandRejection = Schema.is(OrchestrationCommandRejection);
 
 export class OrchestrationCommandIdConflictError extends Schema.TaggedError<OrchestrationCommandIdConflictError>()(
   "OrchestrationCommandIdConflictError",
@@ -117,7 +143,7 @@ export type OrchestrationDispatchError =
   | ProjectionRepositoryError
   | OrchestrationCommandRejection
   | OrchestrationCommandIdConflictError
-  | OrchestrationCommandPreviouslyRejectedError
+  | OrchestrationEngineInternalError
   | OrchestrationProjectorDecodeError
   | OrchestrationListenerCallbackError;
 

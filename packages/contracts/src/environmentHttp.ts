@@ -105,6 +105,10 @@ export class EnvironmentRequestInvalidError extends Schema.TaggedError<Environme
     code: Schema.Literal("invalid_request"),
     reason: EnvironmentRequestInvalidReason,
     traceId: TrimmedNonEmptyString,
+    // Optional so older clients keep decoding the response; new servers attach
+    // it when the rejection has a precise cause worth naming (for example an
+    // orchestration command invariant that failed).
+    detail: Schema.optionalKey(TrimmedNonEmptyString),
   },
   { httpApiStatus: 400 },
 ) {
@@ -113,7 +117,9 @@ export class EnvironmentRequestInvalidError extends Schema.TaggedError<Environme
   }
 
   override get message(): string {
-    return `The environment rejected the request (${this.reason}).`;
+    return this.detail === undefined
+      ? `The environment rejected the request (${this.reason}).`
+      : `The environment rejected the request (${this.reason}): ${this.detail}`;
   }
 }
 
