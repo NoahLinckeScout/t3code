@@ -18,6 +18,7 @@ import {
   type CustomModelSetting,
   ProviderDriverKind,
   type ProviderInstanceId,
+  resolveProviderInstanceEnabled,
   type ServerSettings,
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
@@ -97,7 +98,22 @@ export const resolveLiveClaudeSettings = (input: {
       const decoded = yield* Schema.decodeUnknownEffect(ClaudeSettings)(
         explicit.config ?? decodeClaudeSettings({}),
       ).pipe(Effect.option);
-      return Option.isSome(decoded) ? decoded.value : input.fallback;
+      if (Option.isNone(decoded)) {
+        return input.fallback;
+      }
+      // For a normalized explicit instance `enabled` lives on the envelope and
+      // is stripped from `config`, so the decoded settings alone report the
+      // schema default (enabled) even when the instance is disabled — and this
+      // read feeds the health probe and the managed snapshot, which would run
+      // a disabled instance. Apply the same precedence the registry uses.
+      return {
+        ...decoded.value,
+        enabled: resolveProviderInstanceEnabled({
+          driver: DRIVER_KIND,
+          enabled: explicit.enabled,
+          config: explicit.config,
+        }),
+      };
     }
     if (input.instanceId === defaultInstanceIdForDriver(DRIVER_KIND)) {
       return input.settings.providers.claudeAgent;

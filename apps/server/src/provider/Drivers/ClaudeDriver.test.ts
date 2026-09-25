@@ -107,6 +107,40 @@ describe("resolveLiveClaudeSettings", () => {
     expect(resolved).toEqual(fallback);
   });
 
+  it("applies the envelope enabled flag to the decoded settings", async () => {
+    // A normalized explicit instance carries `enabled` on the envelope with
+    // the flag stripped from `config`; the decoded settings alone would
+    // report the schema default and probe a disabled instance.
+    const settings = {
+      ...emptySettings,
+      providerInstances: {
+        [claudeAgentId]: {
+          driver: ProviderDriverKind.make("claudeAgent"),
+          enabled: false,
+          config: claudeSettings({ enabled: true, customModels: ["c8"] }),
+        },
+      },
+    } as ServerSettings;
+    const resolved = await run(settings);
+    expect(resolved.enabled).toBe(false);
+    expect(resolved.customModels).toEqual(["c8"]);
+  });
+
+  it("keeps a config-level disable winning over an envelope enable", async () => {
+    const settings = {
+      ...emptySettings,
+      providerInstances: {
+        [claudeAgentId]: {
+          driver: ProviderDriverKind.make("claudeAgent"),
+          enabled: true,
+          config: claudeSettings({ enabled: false }),
+        },
+      },
+    } as ServerSettings;
+    const resolved = await run(settings);
+    expect(resolved.enabled).toBe(false);
+  });
+
   it("reads the legacy providers mirror for the default instance id", async () => {
     const settings = {
       ...emptySettings,

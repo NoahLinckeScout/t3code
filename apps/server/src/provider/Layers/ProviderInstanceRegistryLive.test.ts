@@ -719,6 +719,32 @@ describe("ProviderInstanceRegistryLive — session-stable config deltas", () => 
     }).pipe(Effect.provide(testLayer)),
   );
 
+  it.live("does not spare an envelope-only delta", () =>
+    Effect.gen(function* () {
+      // The config is byte-identical, so the driver's predicate accepts the
+      // delta — but displayName was captured by `create()` at build time, so
+      // a spared scope would keep serving the stale envelope (and an enabled
+      // flip would keep a disabled instance alive). The envelope moves, the
+      // instance rebuilds.
+      const config = makeClaudeConfig({ customModels: [] });
+
+      const { registry, mutator } = yield* makeProviderInstanceRegistry<BuiltInDriversEnv>({
+        drivers: [ClaudeDriver],
+        configMap: { [claudeId]: { ...claudeEntry(config), displayName: "before" } },
+      });
+      const before = yield* registry.getInstance(claudeId);
+      expect(before).toBeDefined();
+
+      yield* mutator.reconcile({
+        [claudeId]: { ...claudeEntry(config), displayName: "after" },
+      });
+
+      const after = yield* registry.getInstance(claudeId);
+      expect(after).toBeDefined();
+      expect(after).not.toBe(before);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
   it.live("does not spare a delta whose new config fails to decode", () =>
     Effect.gen(function* () {
       const configA = makeClaudeConfig({ customModels: [] });
