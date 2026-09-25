@@ -16,6 +16,18 @@
  * There are no default named roles. Absent roles config fails closed for
  * capability names. Catalog keys fail closed when the instance is missing,
  * disabled, or does not list the model.
+ *
+ * A named role may also declare `candidates` (an ordered list of model slugs
+ * starting with `model`) with `modelHosts` (slug → host label). When present,
+ * resolution is load-aware: the spawn counts running and pending turns per
+ * slug in the projection database, sums them per host, and binds the role to
+ * the least-loaded host's first candidate. Ties break to the earlier
+ * candidate, and an unreadable database falls back to the head — degraded
+ * mode and preferred mode are the same mode, so losing the load signal
+ * cannot quietly reshape placement. The chosen slug is recorded in the
+ * delegation row and the child's `modelSelection`, so placement stays
+ * auditable after the fact. Bindings affect the next dispatch only; live
+ * turns are never rebalanced.
  */
 import {
   defaultInstanceIdForDriver,
@@ -32,8 +44,10 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ServerConfig } from "../../../config.ts";
 import { OrchestrationToolkitError } from "./schemas.ts";
@@ -69,6 +83,13 @@ export const RoleDefinition = Schema.Struct({
   deadlineMinutes: Schema.optional(Schema.Int),
   /** Extra contract text appended to the child's opening brief. */
   instructions: Schema.optional(Schema.String),
+  /**
+   * Load-aware placement alternatives, ordered; the head must be `model`
+   * itself. Declared only together with `modelHosts`.
+   */
+  candidates: Schema.optional(Schema.Array(Schema.String)),
+  /** Which host serves each candidate slug. Consulted only with `candidates`. */
+  modelHosts: Schema.optional(Schema.Record(Schema.String, Schema.String)),
 });
 export type RoleDefinition = typeof RoleDefinition.Type;
 
@@ -280,10 +301,44 @@ const makeOrchestrationRoles = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  // Acquired at layer build like the delegation store: the placement query
+  // reads the same sqlite client the server already maintains, and the
+  // service methods stay environment-free.
+  const sql = yield* SqlClient.SqlClient;
   const configPath = path.join(config.stateDir, ROLES_CONFIG_FILENAME);
 
   const configMissing = (detail: string) =>
     new OrchestrationToolkitError({ reason: "roles_config_missing", detail });
+
+  /**
+   * Candidate declarations are validated at read time, not at spawn time: a
+   * head that disagrees with `model`, or a candidate whose host is undeclared,
+   * is an operator authoring error that would otherwise surface as a silently
+   * unbalanced pool. Fail the whole config loudly instead.
+   */
+  const validatePlacement = (loaded: RolesConfig): OrchestrationToolkitError | undefined => {
+    for (const [name, definition] of Object.entries(loaded.roles)) {
+      const { candidates, modelHosts, model } = definition;
+      if (candidates === undefined) continue;
+      if (candidates.length === 0) {
+        return configMissing(
+          `Role ${name} declares an empty candidates list. Drop the field to pin the role, or list at least the head model.`,
+        );
+      }
+      if (candidates[0] !== model) {
+        return configMissing(
+          `Role ${name} candidates must start with the head model ${model}, got ${candidates[0]}.`,
+        );
+      }
+      const unhosted = candidates.filter((slug) => modelHosts?.[slug] === undefined);
+      if (unhosted.length > 0) {
+        return configMissing(
+          `Role ${name} candidates lack a modelHosts entry: ${unhosted.join(", ")}.`,
+        );
+      }
+    }
+    return undefined;
+  };
 
   /**
    * Re-read per call rather than cache. Spawns are rare, and an operator who
@@ -303,6 +358,10 @@ const makeOrchestrationRoles = Effect.gen(function* () {
       Effect.mapError((cause) =>
         configMissing(`${configPath} does not match the roles schema: ${String(cause)}`),
       ),
+      Effect.flatMap((loaded) => {
+        const invalid = validatePlacement(loaded);
+        return invalid === undefined ? Effect.succeed(loaded) : Effect.fail(invalid);
+      }),
     );
   });
 
@@ -369,6 +428,84 @@ const makeOrchestrationRoles = Effect.gen(function* () {
     } satisfies ResolvedRole;
   });
 
+  /**
+   * Running and pending turn counts per (provider instance, model slug), from
+   * the same projection the server already maintains. The routing instanceId
+   * is part of the key: two configured instances can expose the same slug,
+   * and a busy unrelated instance must not make this role avoid an otherwise
+   * idle host. Pending counts: a host has accepted that work even if it has
+   * not started it, and a host pinned at its own concurrency cap reports a
+   * constant running count — the queue behind it is what distinguishes
+   * saturated from comfortable.
+   */
+  const instanceModelLoads = Effect.fn("OrchestrationRoles.instanceModelLoads")(function* () {
+    const rows = yield* sql<{
+      readonly instanceId: string;
+      readonly model: string;
+      readonly load: number;
+    }>`
+      SELECT json_extract(t.model_selection_json, '$.instanceId') AS instanceId,
+             json_extract(t.model_selection_json, '$.model') AS model, COUNT(*) AS load
+      FROM projection_threads t
+      JOIN projection_turns u ON u.turn_id = t.latest_turn_id AND u.thread_id = t.thread_id
+      WHERE u.state IN ('running', 'pending')
+        AND json_extract(t.model_selection_json, '$.instanceId') IS NOT NULL
+        AND json_extract(t.model_selection_json, '$.model') IS NOT NULL
+      GROUP BY instanceId, model
+    `;
+    const loads = new Map<string, Map<string, number>>();
+    for (const row of rows) {
+      const byModel = loads.get(row.instanceId) ?? new Map<string, number>();
+      byModel.set(row.model, Number(row.load));
+      loads.set(row.instanceId, byModel);
+    }
+    return loads;
+  });
+
+  /**
+   * Bind the role to the least-loaded host's first candidate. A missing or
+   * unreadable load signal is not an error — it resolves to the head, so the
+   * degraded mode and the preferred mode are the same mode. Ties break to the
+   * earlier candidate, which keeps the ordering in the roles file meaningful.
+   *
+   * Load is summed over every slug in `modelHosts`, not only the candidates:
+   * alias slugs that rewrite to the same host on the way out
+   * (`glm-5.3-flash-deep` → the flash host) are load that host already
+   * carries, and ignoring them would double-book the machine. Only turns
+   * routed to the role's own provider instance count — the load query keys on
+   * the routing instanceId, so another instance serving the same slug stays
+   * out of this role's arithmetic.
+   */
+  const placeOnCandidates = Effect.fn("OrchestrationRoles.placeOnCandidates")(function* (
+    head: string,
+    candidates: ReadonlyArray<string>,
+    modelHosts: Readonly<Record<string, string>>,
+    providerInstanceId: ProviderInstanceId,
+  ) {
+    const loads = yield* instanceModelLoads().pipe(Effect.option);
+    if (Option.isNone(loads)) {
+      return head;
+    }
+    const instanceLoads = loads.value.get(providerInstanceId) ?? new Map<string, number>();
+    const hostLoad = new Map<string, number>();
+    for (const [slug, host] of Object.entries(modelHosts)) {
+      hostLoad.set(host, (hostLoad.get(host) ?? 0) + (instanceLoads.get(slug) ?? 0));
+    }
+    const loadOf = (slug: string): number => {
+      const host = modelHosts[slug];
+      // A candidate without a declared host is refused at load time; if one
+      // is ever seen here anyway it is not placeable, so it reads as full.
+      return host === undefined ? Number.MAX_SAFE_INTEGER : (hostLoad.get(host) ?? 0);
+    };
+    let best = head;
+    for (const slug of candidates) {
+      if (loadOf(slug) < loadOf(best)) {
+        best = slug;
+      }
+    }
+    return best;
+  });
+
   const resolve: OrchestrationRolesShape["resolve"] = Effect.fn("OrchestrationRoles.resolve")(
     function* (roleName) {
       const loaded = yield* load();
@@ -382,10 +519,19 @@ const makeOrchestrationRoles = Effect.gen(function* () {
           detail: `Role ${roleName} is disabled in ${configPath}.`,
         });
       }
+      const model =
+        definition.candidates !== undefined && definition.modelHosts !== undefined
+          ? yield* placeOnCandidates(
+              definition.model,
+              definition.candidates,
+              definition.modelHosts,
+              definition.providerInstanceId,
+            )
+          : definition.model;
       return {
         name: roleName,
         providerInstanceId: definition.providerInstanceId,
-        model: definition.model,
+        model,
         options: definition.options,
         deadlineMinutes: definition.deadlineMinutes,
         runtimeMode: definition.runtimeMode ?? "full-access",

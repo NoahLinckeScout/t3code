@@ -1,4 +1,11 @@
-import { CommandId, EventId, MessageId, ProjectId, ThreadId } from "@t3tools/contracts";
+import {
+  CommandId,
+  EventId,
+  MessageId,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -272,6 +279,18 @@ const agent_spawn = Effect.fn("OrchestrationToolkit.agent_spawn")(function* (inp
   }
 
   const role = yield* roles.resolve(resumed?.role ?? input.role);
+  // An idempotent resume dispatches the command the pending row recorded:
+  // re-resolving a load-aware role can bind a different candidate as live
+  // load moved, and the child would then run a model the delegation row
+  // never named — breaking the exact-command recovery path this row exists
+  // for. Placement, runtime mode, and options still come from the current
+  // role config; only the recorded placement is frozen.
+  const placement = resumed
+    ? {
+        providerInstanceId: ProviderInstanceId.make(resumed.providerInstanceId),
+        model: resumed.model,
+      }
+    : role;
 
   // Before contending for a lease, retire anything that has plainly stopped.
   // A child that died holding a lease should not block its own replacement.
@@ -327,8 +346,8 @@ const agent_spawn = Effect.fn("OrchestrationToolkit.agent_spawn")(function* (inp
   }
 
   const modelSelection = {
-    instanceId: role.providerInstanceId,
-    model: role.model,
+    instanceId: placement.providerInstanceId,
+    model: placement.model,
     ...(role.options === undefined ? {} : { options: role.options }),
   };
   const worktreePath = input.workdir ?? (yield* store.worktreePathOfThread(parentThreadId));
