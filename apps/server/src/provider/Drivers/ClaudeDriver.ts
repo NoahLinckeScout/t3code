@@ -110,7 +110,7 @@ export const resolveLiveClaudeSettings = (input: {
         ...decoded.value,
         enabled: resolveProviderInstanceEnabled({
           driver: DRIVER_KIND,
-          enabled: explicit.enabled,
+          ...(explicit.enabled !== undefined ? { enabled: explicit.enabled } : {}),
           config: explicit.config,
         }),
       };
