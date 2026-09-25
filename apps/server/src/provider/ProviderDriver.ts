@@ -153,6 +153,20 @@ export interface ProviderDriver<Config, R = never> {
    */
   readonly configSchema: Schema.Codec<Config, unknown>;
   /**
+   * When provided, `reconcile` consults it before replacing an instance
+   * whose config changed: returning true keeps the existing instance scope —
+   * and every in-flight session running on it — instead of tearing it down.
+   * Closing an instance scope force-stops each live session mid-turn
+   * ("Session stopped."), so a delta a driver declares session-stable must
+   * genuinely be invisible to running sessions. The delta is delivered to
+   * new sessions through the driver's own live config reads.
+   *
+   * Only `config` deltas reach this predicate; envelope-level changes
+   * (enabled, displayName, accentColor, environment, driver kind) always
+   * rebuild. When the predicate is absent, any config delta rebuilds.
+   */
+  readonly configChangeSparesSessions?: (previous: unknown, next: unknown) => boolean;
+  /**
    * Default config payload used when the legacy
    * `ServerSettings.providers.<kind>` entry is empty or when the driver
    * is auto-bootstrapped without user configuration. Returning a typed

@@ -94,6 +94,54 @@ const entryEqual = (a: ProviderInstanceConfig, b: ProviderInstanceConfig): boole
   Equal.equals(a, b);
 
 /**
+ * Envelope delta (everything but `driver` and `config`) between two entries.
+ * An empty delta means only the config payload moved.
+ */
+const envelopeDelta = (previous: ProviderInstanceConfig, next: ProviderInstanceConfig): boolean => {
+  const { config: _prevConfig, driver: _prevDriver, ...prevEnvelope } = previous;
+  const { config: _nextConfig, driver: _nextDriver, ...nextEnvelope } = next;
+  return !Equal.equals(prevEnvelope, nextEnvelope);
+};
+
+/**
+ * True when the instance can keep its live scope across this config delta:
+ * the envelope is unchanged, the driver declares the delta session-stable,
+ * AND the new config still decodes. An invalid config must keep surfacing as
+ * an unavailable shadow snapshot, not be silently ignored behind a spared
+ * scope. Closing an instance scope force-stops every session it is running
+ * mid-turn, so this is the gate that decides whether a settings edit kills
+ * the fleet.
+ */
+const configDeltaSparesSessions = <R>(
+  driversById: ReadonlyMap<ProviderDriverKind, AnyProviderDriver<R>>,
+  previous: ProviderInstanceConfig,
+  next: ProviderInstanceConfig,
+): Effect.Effect<boolean> =>
+  Effect.gen(function* () {
+    if (previous.driver !== next.driver) {
+      return false;
+    }
+    // Envelope fields (enabled, displayName, accentColor, environment) were
+    // captured by the driver's `create()` at build time; a spared scope would
+    // keep serving the stale values — including staying up after a disable —
+    // so any envelope delta rebuilds regardless of what the config did.
+    if (envelopeDelta(previous, next)) {
+      return false;
+    }
+    const driver = driversById.get(next.driver);
+    if (!driver?.configChangeSparesSessions) {
+      return false;
+    }
+    if (!driver.configChangeSparesSessions(previous.config, next.config)) {
+      return false;
+    }
+    const decoded = yield* Schema.decodeUnknownEffect(driver.configSchema)(
+      next.config ?? driver.defaultConfig(),
+    ).pipe(Effect.result);
+    return decoded._tag === "Success";
+  });
+
+/**
  * Resolve an entry's enabled state. An explicit false on either the
  * envelope or the raw config blob wins (most restrictive) — old settings
  * files can carry both flags with conflicting values, and a user's disable
@@ -232,17 +280,27 @@ const makeReconcile = <R>(input: {
       );
 
       // 1. Close scopes for instances that disappeared or whose config
-      //    changed. Do this BEFORE creating replacements so ids map 1-to-1
-      //    to live scopes at all times.
+      //    changed in a way the driver does not declare session-stable. Do
+      //    this BEFORE creating replacements so ids map 1-to-1 to live
+      //    scopes at all times.
       const removedIds: Array<ProviderInstanceId> = [];
       const replacedIds = new Set<ProviderInstanceId>();
+      // Deltas a driver declares session-stable: keep the live scope —
+      // closing it would force-stop every in-flight session — and record
+      // the new envelope below so the next diff starts from it.
+      const sparedEnvelopes = new Map<ProviderInstanceId, ProviderInstanceConfig>();
       for (const [instanceId, live] of previousEntries) {
         if (!nextKeys.has(instanceId)) {
           removedIds.push(instanceId);
           continue;
         }
         const nextEntry = configMap[instanceId];
-        if (nextEntry !== undefined && !entryEqual(live.entry, nextEntry)) {
+        if (nextEntry === undefined || entryEqual(live.entry, nextEntry)) {
+          continue;
+        }
+        if (yield* configDeltaSparesSessions(driversById, live.entry, nextEntry)) {
+          sparedEnvelopes.set(instanceId, nextEntry);
+        } else {
           replacedIds.add(instanceId);
         }
       }
@@ -267,8 +325,11 @@ const makeReconcile = <R>(input: {
 
         const existing = previousEntries.get(instanceId);
         if (existing !== undefined && !replacedIds.has(instanceId)) {
-          // No-op update: keep the existing live entry and scope.
-          builtEntries.set(instanceId, existing);
+          // No-op or session-stable update: keep the existing live entry and
+          // scope, recording a spared envelope so the next diff starts from
+          // what the settings now say.
+          const spared = sparedEnvelopes.get(instanceId);
+          builtEntries.set(instanceId, spared ? { ...existing, entry: spared } : existing);
           continue;
         }
 
