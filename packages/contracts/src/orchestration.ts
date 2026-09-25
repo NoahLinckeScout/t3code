@@ -1378,8 +1378,9 @@ export type AgentDelegationHandoff = typeof AgentDelegationHandoff.Type;
  * when the session is not bound.
  *
  * There is no `modelSelection` on `agent.spawn` on purpose. Callers name a
- * role; the roles config decides which provider instance and model serve it.
- * That keeps Opus-routing a config decision rather than a JSON blob any CLI
+ * role; named roles resolve through the roles config, and `instanceId/model`
+ * keys resolve through the same settings catalog `t3-orchestrate` uses.
+ * That keeps routing a config decision rather than a JSON blob any CLI
  * can send.
  */
 const AgentCommandIdField = { commandId: CommandId } as const;
