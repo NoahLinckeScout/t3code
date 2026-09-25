@@ -197,7 +197,7 @@ export const catalogInstancesFromSettings = (raw: unknown): ReadonlyArray<Catalo
     try {
       enabled = resolveProviderInstanceEnabled({
         driver: ProviderDriverKind.make(driver),
-        enabled: typeof record.enabled === "boolean" ? record.enabled : undefined,
+        ...(typeof record.enabled === "boolean" ? { enabled: record.enabled } : {}),
         config: record.config,
       });
     } catch {
@@ -306,16 +306,22 @@ const makeOrchestrationRoles = Effect.gen(function* () {
     );
   });
 
+  const decodeSettingsJson = Schema.decodeUnknownEffect(fromLenientJson(Schema.Unknown));
+  const emptyCatalog: ReadonlyArray<CatalogInstance> = [];
   const loadCatalog = Effect.fn("OrchestrationRoles.loadCatalog")(function* () {
     const raw = yield* fs.readFileString(config.settingsPath).pipe(Effect.orElseSucceed(() => ""));
     if (raw.trim() === "") {
       return [];
     }
-    try {
-      return catalogInstancesFromSettings(JSON.parse(raw) as unknown);
-    } catch {
-      return [];
-    }
+    // A malformed settings file yields no catalog rather than failing the
+    // role lookup; `Effect.try` keeps the catalog reader's own throws in the
+    // same net as the decode failure.
+    return yield* Effect.orElseSucceed(
+      Effect.flatMap(decodeSettingsJson(raw), (settings) =>
+        Effect.try(() => catalogInstancesFromSettings(settings)),
+      ),
+      () => emptyCatalog,
+    );
   });
 
   const resolveFromCatalog = Effect.fn("OrchestrationRoles.resolveFromCatalog")(function* (
