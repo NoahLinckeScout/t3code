@@ -2857,6 +2857,7 @@ export function makeOpenCodeAdapter(
                 environment: McpProviderSession.withAgentDeviceEnvironment(
                   options?.environment ?? process.env,
                   mcpSession,
+                  { threadId: input.threadId },
                 ),
               });
               const client = openCodeRuntime.createOpenCodeSdkClient({
