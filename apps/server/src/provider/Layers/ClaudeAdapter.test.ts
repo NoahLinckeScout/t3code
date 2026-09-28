@@ -510,6 +510,102 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("does not lower a model's native context window", () => {
+    const harness = makeHarness({ claudeConfig: { autoCompactWindow: "300000" } });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        // No explicit options: the fixture's default context window is the
+        // 1M "expanded" selection.
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          SYNTHETIC_CLAUDE_CAPABLE_MODEL,
+          [],
+        ),
+        runtimeMode: "full-access",
+      });
+
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.equal(options?.settings, undefined);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("does not lower the window pinned by a context-window model suffix", () => {
+    const harness = makeHarness({ claudeConfig: { autoCompactWindow: "300000" } });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        // A custom passthrough slug carrying the fixture's "[expanded]"
+        // suffix resolves no catalog window of its own.
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-custom-passthrough[expanded]",
+          [],
+        ),
+        runtimeMode: "full-access",
+      });
+
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.equal(options?.settings, undefined);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps the configured window for models with an unknown context", () => {
+    const harness = makeHarness({ claudeConfig: { autoCompactWindow: "300000" } });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          SYNTHETIC_CLAUDE_THINKING_MODEL,
+          [],
+        ),
+        runtimeMode: "full-access",
+      });
+
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.deepEqual(options?.settings, { autoCompactWindow: 300000 });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps the configured window when it is not below the native window", () => {
+    const harness = makeHarness({ claudeConfig: { autoCompactWindow: "300000" } });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          SYNTHETIC_CLAUDE_CAPABLE_MODEL,
+          [{ id: "contextWindow", value: "standard" }],
+        ),
+        runtimeMode: "full-access",
+      });
+
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.deepEqual(options?.settings, { autoCompactWindow: 300000 });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("forwards claude effort levels into query options", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
