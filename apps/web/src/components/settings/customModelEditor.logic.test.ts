@@ -14,6 +14,7 @@ import {
 const draft = (overrides: Partial<CustomModelDraft>): CustomModelDraft => ({
   slug: "my-model",
   name: "",
+  autoCompactWindow: "",
   descriptors: [],
   ...overrides,
 });
@@ -42,6 +43,7 @@ describe("customModelEditor.logic", () => {
     expect(definition).toEqual({
       slug: "my-model",
       name: "My Model",
+      autoCompactWindow: null,
       capabilities: {
         optionDescriptors: [
           {
@@ -169,7 +171,7 @@ describe("customModelEditor.logic", () => {
     ).toBe(false);
     const cursorCopy = descriptorsFromCapabilities(capabilities, ProviderDriverKind.make("cursor"));
     expect(cursorCopy.map((option) => option.id)).toEqual(["contextWindow", "thinking"]);
-    const authored = { slug: "custom", name: "Custom", capabilities };
+    const authored = { slug: "custom", name: "Custom", capabilities, autoCompactWindow: null };
     expect(
       definitionFromDraft(draftFromDefinition(authored)).capabilities?.optionDescriptors?.[0],
     ).toMatchObject(capabilities.optionDescriptors![0]!);
@@ -222,8 +224,12 @@ describe("customModelEditor.logic", () => {
       slug: "my-model",
       name: "my-model",
       capabilities: null,
+      autoCompactWindow: null,
     });
-    expect(draftFromDefinition({ slug: "x", name: "x", capabilities: null }).name).toBe("");
+    expect(
+      draftFromDefinition({ slug: "x", name: "x", capabilities: null, autoCompactWindow: null })
+        .name,
+    ).toBe("");
   });
 
   it("rejects duplicate ids, blank ids, and selects without choices", () => {
@@ -255,5 +261,20 @@ describe("customModelEditor.logic", () => {
       validateDraft(draft({ descriptors: [select("effort", [{ id: "a" }, { id: "a" }])] })),
     ).toBe('Option 1: choice "a" is used twice.');
     expect(validateDraft(draft({ descriptors: [select("effort", [{ id: "a" }])] }))).toBeNull();
+  });
+
+  it("round-trips the auto-compact window and rejects out-of-range values", () => {
+    const definition = definitionFromDraft(draft({ autoCompactWindow: " 700000 " }));
+    expect(definition.autoCompactWindow).toBe("700000");
+    expect(draftFromDefinition(definition).autoCompactWindow).toBe("700000");
+    expect(definitionFromDraft(draft({ autoCompactWindow: "  " })).autoCompactWindow).toBeNull();
+
+    expect(validateDraft(draft({ autoCompactWindow: "700000" }))).toBeNull();
+    expect(validateDraft(draft({ autoCompactWindow: "99999" }))).toBe(
+      "Auto-compact window must be an integer from 100000 to 1000000, or empty.",
+    );
+    expect(validateDraft(draft({ autoCompactWindow: "1000001" }))).toBe(
+      "Auto-compact window must be an integer from 100000 to 1000000, or empty.",
+    );
   });
 });

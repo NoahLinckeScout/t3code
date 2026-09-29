@@ -314,6 +314,27 @@ export function CustomModelEditor({
         />
       </div>
 
+      <div className="flex flex-col gap-1">
+        <label htmlFor={domId("autocompact")} className="text-xs text-muted-foreground">
+          Auto-compact window (tokens)
+        </label>
+        <Input
+          id={domId("autocompact")}
+          size="sm"
+          value={draft.autoCompactWindow}
+          onChange={(event) =>
+            setDraft((current) => ({ ...current, autoCompactWindow: event.target.value }))
+          }
+          placeholder="e.g. 700000, or empty for the provider default"
+          className="sm:w-72 font-mono"
+          spellCheck={false}
+        />
+        <p className="text-xs text-muted-foreground/70">
+          Compacts after this many tokens, even below the model's native window. Claude only;
+          overrides the provider's global setting.
+        </p>
+      </div>
+
       <div className="flex flex-col gap-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="text-xs text-muted-foreground">Options shown in the composer</span>

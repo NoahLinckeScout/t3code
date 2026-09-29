@@ -606,6 +606,90 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("does not forward a global window below a 1M model's native window", () => {
+    const harness = makeHarness({ claudeConfig: { autoCompactWindow: "700000" } });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        // The fixture's default context window is the 1M "expanded" selection.
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          SYNTHETIC_CLAUDE_CAPABLE_MODEL,
+          [],
+        ),
+        runtimeMode: "full-access",
+      });
+
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.equal(options?.settings, undefined);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("forwards a per-model window even below the native window", () => {
+    const harness = makeHarness({
+      claudeConfig: {
+        autoCompactWindow: "300000",
+        customModels: [{ slug: SYNTHETIC_CLAUDE_CAPABLE_MODEL, autoCompactWindow: "700000" }],
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        // 1M native window: the global 300000 alone would be dropped, so a
+        // forwarded 700000 proves the per-model entry won.
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          SYNTHETIC_CLAUDE_CAPABLE_MODEL,
+          [],
+        ),
+        runtimeMode: "full-access",
+      });
+
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.deepEqual(options?.settings, { autoCompactWindow: 700000 });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("applies a per-model window only to its own model", () => {
+    const harness = makeHarness({
+      claudeConfig: {
+        autoCompactWindow: "300000",
+        customModels: [{ slug: SYNTHETIC_CLAUDE_CAPABLE_MODEL, autoCompactWindow: "700000" }],
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          SYNTHETIC_CLAUDE_STANDARD_MODEL,
+          [{ id: "contextWindow", value: "standard" }],
+        ),
+        runtimeMode: "full-access",
+      });
+
+      // The other model falls back to the global window under the
+      // does-not-lower rule, not the per-model 700000.
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.deepEqual(options?.settings, { autoCompactWindow: 300000 });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("forwards claude effort levels into query options", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

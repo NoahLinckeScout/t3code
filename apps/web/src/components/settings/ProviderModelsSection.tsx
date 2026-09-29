@@ -196,6 +196,16 @@ export function ProviderModelsSection({
     (model) => !model.isCustom && hiddenModelSet.has(model.slug),
   ).length;
   const builtInModels = useMemo(() => models.filter((model) => !model.isCustom), [models]);
+  // Per-model Claude auto-compact windows, for the tag on custom rows.
+  const autoCompactWindowBySlug = useMemo(
+    () =>
+      new Map(
+        customModels.flatMap((entry) =>
+          entry.autoCompactWindow ? [[entry.slug, entry.autoCompactWindow] as const] : [],
+        ),
+      ),
+    [customModels],
+  );
   const allBuiltInModelsHidden =
     builtInModels.length > 0 && builtInModels.every((model) => hiddenModelSet.has(model.slug));
   const showFilter = models.length > FILTER_THRESHOLD;
@@ -246,7 +256,10 @@ export function ProviderModelsSection({
     // which is also what lets the pending scroll target resolve and clear.
     scrollToSlugRef.current = normalized;
     setFilter("");
-    onChange([...customModels, { slug: normalized, name: normalized, capabilities: null }]);
+    onChange([
+      ...customModels,
+      { slug: normalized, name: normalized, capabilities: null, autoCompactWindow: null },
+    ]);
     setInput("");
     setError(null);
     setIsAdding(false);
@@ -482,6 +495,11 @@ export function ProviderModelsSection({
           ) : null}
           {model.isCustom ? (
             <span className="text-[11px] text-muted-foreground/70">custom</span>
+          ) : null}
+          {autoCompactWindowBySlug.get(model.slug) ? (
+            <span className="text-[11px] text-muted-foreground/70">
+              auto-compact {autoCompactWindowBySlug.get(model.slug)}
+            </span>
           ) : null}
         </span>
         {/*

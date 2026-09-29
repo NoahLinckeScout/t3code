@@ -1,7 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
-import { TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
 import { ProviderDriverKind } from "./providerInstance.ts";
 
 export const ProviderOptionDescriptorType = Schema.Literals(["select", "boolean"]);
@@ -127,15 +127,27 @@ export const ModelCapabilities = Schema.Struct({
 });
 export type ModelCapabilities = typeof ModelCapabilities.Type;
 
+// Empty, or an integer from 100,000 to 1,000,000. Shared by the Claude
+// provider's global auto-compact window and the per-model window on a
+// custom model entry so an out-of-range value fails at the update that
+// introduced it.
+export const CLAUDE_AUTO_COMPACT_WINDOW_PATTERN = /^(?:|[1-9]\d{5}|1000000)$/;
+
 /**
  * A user-authored custom model. `name` and `capabilities` are optional so a
  * bare slug keeps its driver-default presentation; when `capabilities` is
  * set, its descriptors replace the driver default in the model picker.
+ * `autoCompactWindow` (Claude only) overrides the provider's global
+ * auto-compact window for this model and is always applied, even below the
+ * model's native window.
  */
 export const CustomModelEntry = Schema.Struct({
   slug: TrimmedNonEmptyString,
   name: Schema.optional(TrimmedNonEmptyString),
   capabilities: Schema.optional(ModelCapabilities),
+  autoCompactWindow: Schema.optional(
+    TrimmedString.check(Schema.isPattern(CLAUDE_AUTO_COMPACT_WINDOW_PATTERN)),
+  ),
 });
 export type CustomModelEntry = typeof CustomModelEntry.Type;
 

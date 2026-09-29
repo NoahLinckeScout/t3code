@@ -64,6 +64,7 @@ import {
   getModelSelectionBooleanOptionValue,
   getModelSelectionStringOptionValue,
   getProviderOptionDescriptors,
+  readCustomModelEntries,
   resolvePromptInjectedEffort,
 } from "@t3tools/shared/model";
 import {
@@ -4737,21 +4738,29 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       // The CLI clamps a settings window against the model's own context, so a
       // small global value would cap every larger-window model: a 350k setting
       // compacted 1M-context opus at ~318k while GLM routes escaped via router
-      // env. Forward the configured window only when it does not lower the
+      // env. Forward the global window only when it does not lower the
       // model's native window; models with an unknown window (custom
-      // gateways) keep it, preserving their autocompact fallback.
-      const configuredAutoCompactWindow = claudeSettings.autoCompactWindow
+      // gateways) keep it, preserving their autocompact fallback. A window
+      // set on the selected model's custom entry wins and is always
+      // forwarded, even below the native window.
+      const perModelAutoCompactWindow =
+        readCustomModelEntries(claudeSettings.customModels).find(
+          (entry) => entry.slug === modelSelection?.model,
+        )?.autoCompactWindow ?? undefined;
+      const globalAutoCompactWindow = claudeSettings.autoCompactWindow
         ? Number(claudeSettings.autoCompactWindow)
         : undefined;
       const nativeContextWindow =
         initialContextWindow ??
         claudeSuffixContextWindowTokens(modelCatalog, apiModelId ?? modelSelection?.model);
       const autoCompactWindow =
-        nativeContextWindow === undefined ||
-        configuredAutoCompactWindow === undefined ||
-        configuredAutoCompactWindow >= nativeContextWindow
-          ? configuredAutoCompactWindow
-          : undefined;
+        perModelAutoCompactWindow !== undefined
+          ? Number(perModelAutoCompactWindow)
+          : nativeContextWindow === undefined ||
+              globalAutoCompactWindow === undefined ||
+              globalAutoCompactWindow >= nativeContextWindow
+            ? globalAutoCompactWindow
+            : undefined;
       const settings = {
         ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
         ...(fastMode ? { fastMode: true } : {}),
