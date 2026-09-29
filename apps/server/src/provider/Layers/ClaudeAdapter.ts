@@ -1984,11 +1984,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   options?: ClaudeAdapterLiveOptions,
 ) {
   const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("claudeAgent");
+  const customModelsEffect = options?.customModels ?? Effect.succeed(claudeSettings.customModels);
   const modelCatalogEffect = (
     options?.modelCatalog ?? Effect.succeed(BUNDLED_CLAUDE_MODEL_CATALOG)
   ).pipe(
     Effect.flatMap((catalog) =>
-      (options?.customModels ?? Effect.succeed(claudeSettings.customModels)).pipe(
+      customModelsEffect.pipe(
         Effect.map((customModels) => scopeClaudeModelCatalog(catalog, customModels)),
       ),
     ),
@@ -4744,7 +4745,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       // set on the selected model's custom entry wins and is always
       // forwarded, even below the native window.
       const perModelAutoCompactWindow =
-        readCustomModelEntries(claudeSettings.customModels).find(
+        readCustomModelEntries(yield* customModelsEffect).find(
           (entry) => entry.slug === modelSelection?.model,
         )?.autoCompactWindow ?? undefined;
       const globalAutoCompactWindow = claudeSettings.autoCompactWindow
