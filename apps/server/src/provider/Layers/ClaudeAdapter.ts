@@ -4747,11 +4747,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       // gateways) keep it, preserving their autocompact fallback. A per-model
       // or custom-entry window wins and is always forwarded, even below the
       // native window.
+      const customAutoCompactWindow = readCustomModelEntries(yield* customModelsEffect).find(
+        (entry) => entry.slug === modelSelection?.model,
+      )?.autoCompactWindow;
+      // A bare-slug custom entry decodes with a null window; normalize every
+      // unset shape (null, empty) to undefined so only a real window counts.
       const perModelAutoCompactWindow =
         (apiModelId ? claudeSettings.autoCompactWindowByModel[apiModelId] : undefined) ||
-        readCustomModelEntries(yield* customModelsEffect).find(
-          (entry) => entry.slug === modelSelection?.model,
-        )?.autoCompactWindow;
+        customAutoCompactWindow ||
+        undefined;
       const globalAutoCompactWindow = claudeSettings.autoCompactWindow
         ? Number(claudeSettings.autoCompactWindow)
         : undefined;
