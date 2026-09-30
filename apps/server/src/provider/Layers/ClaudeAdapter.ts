@@ -4742,12 +4742,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       // env. Forward the global window only when it does not lower the
       // model's native window; models with an unknown window (custom
       // gateways) keep it, preserving their autocompact fallback. A window
-      // set on the selected model's custom entry wins and is always
-      // forwarded, even below the native window.
+      // set for the exact model id the session runs as (context-window
+      // suffix included), or on the selected model's custom entry, wins and
+      // is always forwarded, even below the native window.
       const perModelAutoCompactWindow =
-        readCustomModelEntries(yield* customModelsEffect).find(
+        (apiModelId ? claudeSettings.autoCompactWindowByModel[apiModelId] : undefined) ||
+        (readCustomModelEntries(yield* customModelsEffect).find(
           (entry) => entry.slug === modelSelection?.model,
-        )?.autoCompactWindow ?? undefined;
+        )?.autoCompactWindow ??
+          undefined);
       const globalAutoCompactWindow = claudeSettings.autoCompactWindow
         ? Number(claudeSettings.autoCompactWindow)
         : undefined;

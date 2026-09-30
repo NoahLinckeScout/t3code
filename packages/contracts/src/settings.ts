@@ -660,6 +660,15 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    // Keyed by the model id the session runs as, so a context-window variant
+    // ("claude-opus-5-5[1m]") gets its own window without a custom model.
+    autoCompactWindowByModel: Schema.Record(
+      TrimmedNonEmptyString,
+      TrimmedString.check(Schema.isPattern(CLAUDE_AUTO_COMPACT_WINDOW_PATTERN)),
+    ).pipe(
+      Schema.withDecodingDefault(Effect.succeed({})),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
   },
   {
     order: ["binaryPath", "homePath", "autoCompactWindow", "launchArgs"],
@@ -1308,6 +1317,12 @@ const ClaudeSettingsPatch = Schema.Struct({
   // schema error instead of a generic whole-settings failure.
   autoCompactWindow: Schema.optionalKey(
     TrimmedString.check(Schema.isPattern(CLAUDE_AUTO_COMPACT_WINDOW_PATTERN)),
+  ),
+  autoCompactWindowByModel: Schema.optionalKey(
+    Schema.Record(
+      TrimmedNonEmptyString,
+      TrimmedString.check(Schema.isPattern(CLAUDE_AUTO_COMPACT_WINDOW_PATTERN)),
+    ),
   ),
 });
 

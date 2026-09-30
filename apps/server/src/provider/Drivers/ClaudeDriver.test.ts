@@ -19,6 +19,7 @@ const claudeSettings = (overrides: Partial<ClaudeSettingsType>): ClaudeSettingsT
     customModels: [],
     launchArgs: "",
     autoCompactWindow: "",
+    autoCompactWindowByModel: {},
     ...overrides,
   }) as ClaudeSettingsType;
 

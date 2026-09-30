@@ -660,6 +660,44 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("keys a window on the model id the session runs as", () => {
+    const harness = makeHarness({
+      claudeConfig: {
+        autoCompactWindow: "350000",
+        autoCompactWindowByModel: { [`${SYNTHETIC_CLAUDE_CAPABLE_MODEL}[expanded]`]: "700000" },
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const startWithWindow = (threadId: ThreadId, contextWindow: string) =>
+        adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("claudeAgent"),
+            SYNTHETIC_CLAUDE_CAPABLE_MODEL,
+            [{ id: "contextWindow", value: contextWindow }],
+          ),
+          runtimeMode: "full-access",
+        });
+
+      yield* startWithWindow(THREAD_ID, "expanded");
+      assert.deepEqual(harness.getLastCreateQueryInput()?.options.settings, {
+        autoCompactWindow: 700000,
+      });
+
+      // The same model at its standard window is a different model id, so
+      // the global window applies.
+      yield* startWithWindow(ThreadId.make("thread-standard-window"), "standard");
+      assert.deepEqual(harness.getLastCreateQueryInput()?.options.settings, {
+        autoCompactWindow: 350000,
+      });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("applies a per-model window only to its own model", () => {
     const harness = makeHarness({
       claudeConfig: {

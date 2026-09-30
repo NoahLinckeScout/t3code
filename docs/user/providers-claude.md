@@ -52,6 +52,17 @@ window instead. To compact a large-window model earlier, set an **Auto-compact
 window** on that model's custom model entry in the instance's model list; a
 per-model window always applies.
 
+A built-in model has no custom entry, so set its window in `settings.json`
+under the instance's `autoCompactWindowByModel`, keyed by the model id Claude
+runs, context-window suffix included:
+
+```json
+"autoCompactWindowByModel": { "claude-opus-5-5[1m]": "700000" }
+```
+
+That applies to Claude Opus 5.5 with the 1M context window only; the same model
+at 200k keeps the global window.
+
 You can also send `/compact` in an existing conversation. Web and desktop offer
 **Compact context** from the context meter and may suggest it when you return to
 a large older thread. See [commands and skills](./composer.md#commands-and-skills)
