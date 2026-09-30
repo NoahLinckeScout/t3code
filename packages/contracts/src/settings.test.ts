@@ -136,31 +136,29 @@ describe("custom model settings", () => {
 });
 
 describe("ClaudeSettings auto-compaction", () => {
-  it("uses Claude's default threshold when no override is configured", () => {
-    expect(decodeClaudeSettings({}).autoCompactWindow).toBe("");
+  it("sets no window unless a model has one", () => {
+    expect(decodeClaudeSettings({}).autoCompactWindowByModel).toEqual({});
   });
 
-  it.each(["100000", "300000", "1000000"])(
-    "accepts a supported auto-compaction threshold: %s",
-    (value) => {
-      expect(decodeClaudeSettings({ autoCompactWindow: value }).autoCompactWindow).toBe(value);
-    },
-  );
-
-  it.each(["99999", "1000001", "300k", "invalid"])(
-    "rejects an unsupported auto-compaction threshold: %s",
-    (value) => {
-      expect(() => decodeClaudeSettings({ autoCompactWindow: value })).toThrow();
-    },
-  );
-
-  it("rejects an unsupported threshold at the settings patch boundary", () => {
-    expect(() =>
-      decodeServerSettingsPatch({ providers: { claudeAgent: { autoCompactWindow: "300k" } } }),
-    ).toThrow();
+  it.each(["100000", "350000", "1000000"])("accepts a supported window: %s", (value) => {
     expect(
-      decodeServerSettingsPatch({ providers: { claudeAgent: { autoCompactWindow: "300000" } } }),
-    ).toBeDefined();
+      decodeClaudeSettings({ autoCompactWindowByModel: { "claude-opus-5-5[1m]": value } })
+        .autoCompactWindowByModel,
+    ).toEqual({ "claude-opus-5-5[1m]": value });
+  });
+
+  it.each(["99999", "1000001", "300k", "invalid"])("rejects an unsupported window: %s", (value) => {
+    expect(() =>
+      decodeClaudeSettings({ autoCompactWindowByModel: { "glm-5.3-flash-or": value } }),
+    ).toThrow();
+  });
+
+  it("rejects an unsupported window at the settings patch boundary", () => {
+    const patch = (value: string) => ({
+      providers: { claudeAgent: { autoCompactWindowByModel: { "glm-5.3-flash-or": value } } },
+    });
+    expect(() => decodeServerSettingsPatch(patch("300k"))).toThrow();
+    expect(decodeServerSettingsPatch(patch("350000"))).toBeDefined();
   });
 });
 

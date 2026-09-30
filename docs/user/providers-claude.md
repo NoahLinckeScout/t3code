@@ -43,25 +43,25 @@ T3 Code uses the Claude configuration on the connected server.
 
 ## Compact long conversations
 
-Set **Auto-compact after** in the Claude provider settings to an integer between
-`100000` and `1000000`. For example, `300000` asks Claude to summarize at about
-300,000 tokens. This changes when compaction happens, not the model's context
-window. Leave it empty for Claude Code's default. A value below a model's context
-window is ignored for that model — the CLI compacts within the model's own
-window instead. To compact a large-window model earlier, set an **Auto-compact
-window** on that model's custom model entry in the instance's model list; a
-per-model window always applies.
+Auto-compaction is set per model. Give a model a window between `100000` and
+`1000000` tokens and Claude summarizes the conversation at about that size; a
+model without one uses Claude Code's default. The window changes when
+compaction happens, not the model's context window.
 
-A built-in model has no custom entry, so set its window in `settings.json`
-under the instance's `autoCompactWindowByModel`, keyed by the model id Claude
-runs, context-window suffix included:
+Set windows in `settings.json` under the Claude instance's
+`autoCompactWindowByModel`, keyed by the model id Claude runs, context-window
+suffix included. A custom model's id is its slug:
 
 ```json
-"autoCompactWindowByModel": { "claude-opus-5-5[1m]": "700000" }
+"autoCompactWindowByModel": {
+  "glm-5.3-flash-or": "350000",
+  "claude-opus-5-5[1m]": "700000"
+}
 ```
 
-That applies to Claude Opus 5.5 with the 1M context window only; the same model
-at 200k keeps the global window.
+Here Claude Opus 5.5 compacts at 700,000 tokens with the 1M context window and
+at Claude Code's default with 200k. A custom model entry can also carry its own
+**Auto-compact window** in the instance's model list.
 
 You can also send `/compact` in an existing conversation. Web and desktop offer
 **Compact context** from the context meter and may suggest it when you return to
