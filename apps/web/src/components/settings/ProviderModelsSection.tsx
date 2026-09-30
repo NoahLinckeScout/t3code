@@ -496,7 +496,7 @@ export function ProviderModelsSection({
           {model.isCustom ? (
             <span className="text-[11px] text-muted-foreground/70">custom</span>
           ) : null}
-          {autoCompactWindowBySlug.get(model.slug) ? (
+          {driverKind === "claudeAgent" && autoCompactWindowBySlug.get(model.slug) ? (
             <span className="text-[11px] text-muted-foreground/70">
               auto-compact {autoCompactWindowBySlug.get(model.slug)}
             </span>

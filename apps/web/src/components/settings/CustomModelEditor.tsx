@@ -63,6 +63,10 @@ export function CustomModelEditor({
   );
   const domId = (suffix: string) => `provider-instance-${instanceId}-custom-model-${suffix}`;
 
+  // Only ClaudeAdapter reads the per-model auto-compact window, so the field
+  // is Claude-only: hidden for other providers and never persisted for them.
+  const isClaude = driverKind === "claudeAgent";
+
   const updateDescriptor = (key: string, patch: Partial<EditorDescriptor>) => {
     setError(null);
     setDraft((current) => ({
@@ -141,7 +145,9 @@ export function CustomModelEditor({
       setError(problem);
       return;
     }
-    onSave(definitionFromDraft(draft));
+    // Drop a stale window value carried in from an older edit session; a
+    // non-Claude provider never renders the field and never persists one.
+    onSave(definitionFromDraft(isClaude ? draft : { ...draft, autoCompactWindow: "" }));
   };
 
   const idSelectValue = (descriptor: EditorDescriptor) =>
@@ -314,26 +320,28 @@ export function CustomModelEditor({
         />
       </div>
 
-      <div className="flex flex-col gap-1">
-        <label htmlFor={domId("autocompact")} className="text-xs text-muted-foreground">
-          Auto-compact window (tokens)
-        </label>
-        <Input
-          id={domId("autocompact")}
-          size="sm"
-          value={draft.autoCompactWindow}
-          onChange={(event) =>
-            setDraft((current) => ({ ...current, autoCompactWindow: event.target.value }))
-          }
-          placeholder="e.g. 700000, or empty for the provider default"
-          className="sm:w-72 font-mono"
-          spellCheck={false}
-        />
-        <p className="text-xs text-muted-foreground/70">
-          Compacts after this many tokens, even below the model's native window. Claude only;
-          overrides the provider's global setting.
-        </p>
-      </div>
+      {isClaude ? (
+        <div className="flex flex-col gap-1">
+          <label htmlFor={domId("autocompact")} className="text-xs text-muted-foreground">
+            Auto-compact window (tokens)
+          </label>
+          <Input
+            id={domId("autocompact")}
+            size="sm"
+            value={draft.autoCompactWindow}
+            onChange={(event) =>
+              setDraft((current) => ({ ...current, autoCompactWindow: event.target.value }))
+            }
+            placeholder="e.g. 700000, or empty for the provider default"
+            className="sm:w-72 font-mono"
+            spellCheck={false}
+          />
+          <p className="text-xs text-muted-foreground/70">
+            Compacts after this many tokens, even below the model's native window. Claude only;
+            overrides the provider's global setting.
+          </p>
+        </div>
+      ) : null}
 
       <div className="flex flex-col gap-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
