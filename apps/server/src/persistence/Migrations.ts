@@ -10,6 +10,7 @@
 
 import * as Migrator from "effect/unstable/sql/Migrator";
 import * as Effect from "effect/Effect";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
@@ -64,7 +65,7 @@ import Migration0049 from "./Migrations/049_ProjectionThreadsActiveOrderKey.ts";
 import Migration0050 from "./Migrations/050_ProjectionThreadPullRequests.ts";
 import Migration0051 from "./Migrations/051_ProjectionThreadMessageContext.ts";
 import Migration0052 from "./Migrations/052_ProjectionThreadTitleState.ts";
-import Migration0053 from "./Migrations/053_OrchestrationCommandReceiptsResultJson.ts";
+import Migration9000 from "./Migrations/9000_OrchestrationCommandReceiptsResultJson.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -129,7 +130,24 @@ const migrationEntries = [
   [50, "ProjectionThreadPullRequests", Migration0050],
   [51, "ProjectionThreadMessageContext", Migration0051],
   [52, "ProjectionThreadTitleState", Migration0052],
-  [53, "OrchestrationCommandReceiptsResultJson", Migration0053],
+] as const;
+
+/**
+ * Fork-only migrations. Upstream numbers its migrations sequentially from 1
+ * and the migrator only ever runs ids above the highest recorded one, so any
+ * fork migration sharing (or above) the upstream sequence would either
+ * collide with a future upstream id or permanently skip upcoming upstream
+ * migrations. Fork migrations therefore live in the reserved 9000-9999 range,
+ * run through their own runner below, and are recorded in their own tracking
+ * table so they never raise the upstream migrator's "latest applied id".
+ *
+ * A fork migration must be safe to re-run: it is applied before it is
+ * recorded, so a crash between the two re-runs it on the next start.
+ */
+const FORK_MIGRATION_BASE = 9000;
+
+const forkMigrationEntries = [
+  [9000, "OrchestrationCommandReceiptsResultJson", Migration9000],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -144,6 +162,52 @@ const makeMigrationLoader = (throughId?: number) =>
   );
 
 /**
+ * Repair for databases migrated by fork versions that recorded the fork's
+ * OrchestrationCommandReceiptsResultJson migration as id 53. Upstream's own
+ * 053_PullRequestFilesViewed uses the same slot, and because the migrator
+ * only runs ids above the highest recorded one, that row would skip it
+ * forever. Delete the stale record so upstream's real 053 runs after the next
+ * upstream merge; the fork's migration re-applies under its own id 9000. The
+ * exact name match keeps this a no-op on databases where upstream's 053 has
+ * already run.
+ */
+const repairStaleForkMigration53 = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`CREATE TABLE IF NOT EXISTS effect_sql_migrations (
+    migration_id integer PRIMARY KEY NOT NULL,
+    created_at datetime NOT NULL DEFAULT current_timestamp,
+    name VARCHAR(255) NOT NULL
+  )`;
+  yield* sql`DELETE FROM effect_sql_migrations
+    WHERE migration_id = 53 AND name = 'OrchestrationCommandReceiptsResultJson'`;
+});
+
+/**
+ * Run fork-only migrations (reserved id range, see forkMigrationEntries)
+ * through their own runner and tracking table. Recording separately from
+ * effect_sql_migrations keeps the upstream migrator's "latest applied id"
+ * aligned with upstream ids, so future upstream migrations are never skipped
+ * no matter how many fork migrations have run.
+ */
+const runForkMigrations = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`CREATE TABLE IF NOT EXISTS effect_sql_migrations_fork (
+    migration_id integer PRIMARY KEY NOT NULL,
+    created_at datetime NOT NULL DEFAULT current_timestamp,
+    name VARCHAR(255) NOT NULL
+  )`;
+  const applied = yield* sql<{ readonly migration_id: number }>`
+    SELECT migration_id FROM effect_sql_migrations_fork
+  `;
+  const appliedIds = new Set(applied.map((row) => Number(row.migration_id)));
+  for (const [id, name, migration] of forkMigrationEntries) {
+    if (appliedIds.has(id)) continue;
+    yield* migration;
+    yield* sql`INSERT OR IGNORE INTO effect_sql_migrations_fork (migration_id, name) VALUES (${id}, ${name})`;
+  }
+});
+
+/**
  * Migrator run function - no schema dumping needed
  * Uses the base Migrator.make without platform dependencies
  */
@@ -154,10 +218,13 @@ export interface RunMigrationsOptions {
 }
 
 /**
- * Run all pending migrations.
+ * Run all pending migrations - upstream's via the effect migrator, the
+ * fork's via its own runner.
  *
- * Creates the migrations tracking table (effect_sql_migrations) if it doesn't exist,
- * then runs any migrations with ID greater than the latest recorded migration.
+ * Creates the migrations tracking tables if they don't exist, repairs the
+ * stale pre-renumbering fork record (see repairStaleForkMigration53), then
+ * runs any migrations with an id above the latest recorded one (upstream) or
+ * not yet recorded (fork).
  *
  * Returns array of [id, name] tuples for migrations that were run.
  *
@@ -166,10 +233,16 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
+  yield* repairStaleForkMigration53;
   const executedMigrations = yield* run({ loader: makeMigrationLoader(toMigrationInclusive) });
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
   yield* migrations.length === 0
     ? Effect.logDebug("Database schema is current")
     : Effect.log("Migrations ran successfully").pipe(Effect.annotateLogs({ migrations }));
+  // A toMigrationInclusive bound below the fork range is a test asking for a
+  // specific upstream prefix; fork migrations stay out of it.
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= FORK_MIGRATION_BASE) {
+    yield* runForkMigrations;
+  }
   return executedMigrations;
 });
