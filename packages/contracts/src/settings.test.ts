@@ -136,11 +136,24 @@ describe("custom model settings", () => {
 });
 
 describe("ClaudeSettings auto-compaction", () => {
-  it("sets no window unless a model has one", () => {
-    expect(decodeClaudeSettings({}).autoCompactWindowByModel).toEqual({});
+  it("defaults the global window to empty and the per-model map to empty", () => {
+    const decoded = decodeClaudeSettings({});
+    expect(decoded.autoCompactWindow).toBe("");
+    expect(decoded.autoCompactWindowByModel).toEqual({});
   });
 
-  it.each(["100000", "350000", "1000000"])("accepts a supported window: %s", (value) => {
+  it.each(["100000", "300000", "1000000"])("accepts a supported global threshold: %s", (value) => {
+    expect(decodeClaudeSettings({ autoCompactWindow: value }).autoCompactWindow).toBe(value);
+  });
+
+  it.each(["99999", "1000001", "300k", "invalid"])(
+    "rejects an unsupported global threshold: %s",
+    (value) => {
+      expect(() => decodeClaudeSettings({ autoCompactWindow: value })).toThrow();
+    },
+  );
+
+  it.each(["100000", "350000", "1000000"])("accepts a supported per-model window: %s", (value) => {
     expect(
       decodeClaudeSettings({ autoCompactWindowByModel: { "claude-opus-5-5[1m]": value } })
         .autoCompactWindowByModel,
@@ -153,7 +166,16 @@ describe("ClaudeSettings auto-compaction", () => {
     ).toThrow();
   });
 
-  it("rejects an unsupported window at the settings patch boundary", () => {
+  it("rejects an unsupported threshold at the settings patch boundary", () => {
+    expect(() =>
+      decodeServerSettingsPatch({ providers: { claudeAgent: { autoCompactWindow: "300k" } } }),
+    ).toThrow();
+    expect(
+      decodeServerSettingsPatch({ providers: { claudeAgent: { autoCompactWindow: "300000" } } }),
+    ).toBeDefined();
+  });
+
+  it("rejects an unsupported per-model window at the settings patch boundary", () => {
     const patch = (value: string) => ({
       providers: { claudeAgent: { autoCompactWindowByModel: { "glm-5.3-flash-or": value } } },
     });

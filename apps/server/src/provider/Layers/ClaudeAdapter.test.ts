@@ -589,6 +589,126 @@ describe("ClaudeAdapterLive", () => {
         );
       }),
     );
+
+    it.effect("a per-model map entry wins over the global window", () =>
+      Effect.gen(function* () {
+        // 1M native window: the global 300000 alone would be dropped, so a
+        // forwarded 700000 proves the map entry won.
+        assert.deepEqual(
+          yield* settingsFor(
+            SYNTHETIC_CLAUDE_CAPABLE_MODEL,
+            [{ id: "contextWindow", value: "expanded" }],
+            { autoCompactWindow: "300000", autoCompactWindowByModel: windows },
+          ),
+          { autoCompactWindow: 700000 },
+        );
+      }),
+    );
+
+    it.effect("a per-model map entry wins over the custom model entry", () =>
+      Effect.gen(function* () {
+        assert.deepEqual(
+          yield* settingsFor("glm-5.3-flash-or", [], {
+            autoCompactWindowByModel: { "glm-5.3-flash-or": "350000" },
+            customModels: [{ slug: "glm-5.3-flash-or", autoCompactWindow: "700000" }],
+          }),
+          { autoCompactWindow: 350000 },
+        );
+      }),
+    );
+
+    it.effect("passes the configured global window to Claude", () =>
+      Effect.gen(function* () {
+        assert.deepEqual(yield* settingsFor(undefined, [], { autoCompactWindow: "300000" }), {
+          autoCompactWindow: 300000,
+        });
+      }),
+    );
+
+    it.effect("does not lower a model's native context window", () =>
+      Effect.gen(function* () {
+        // The fixture's default context window for this model is the 1M
+        // "expanded" selection.
+        assert.equal(
+          yield* settingsFor(SYNTHETIC_CLAUDE_CAPABLE_MODEL, [], { autoCompactWindow: "300000" }),
+          undefined,
+        );
+      }),
+    );
+
+    it.effect("does not lower the window pinned by a context-window model suffix", () =>
+      Effect.gen(function* () {
+        // A custom passthrough slug carrying the fixture's "[expanded]"
+        // suffix resolves no catalog window of its own.
+        assert.equal(
+          yield* settingsFor("claude-custom-passthrough[expanded]", [], {
+            autoCompactWindow: "300000",
+          }),
+          undefined,
+        );
+      }),
+    );
+
+    it.effect("keeps the configured window for models with an unknown context", () =>
+      Effect.gen(function* () {
+        assert.deepEqual(
+          yield* settingsFor(SYNTHETIC_CLAUDE_THINKING_MODEL, [], { autoCompactWindow: "300000" }),
+          { autoCompactWindow: 300000 },
+        );
+      }),
+    );
+
+    it.effect("keeps the configured window when it is not below the native window", () =>
+      Effect.gen(function* () {
+        assert.deepEqual(
+          yield* settingsFor(
+            SYNTHETIC_CLAUDE_CAPABLE_MODEL,
+            [{ id: "contextWindow", value: "standard" }],
+            { autoCompactWindow: "300000" },
+          ),
+          { autoCompactWindow: 300000 },
+        );
+      }),
+    );
+
+    it.effect("does not forward a global window below a 1M model's native window", () =>
+      Effect.gen(function* () {
+        assert.equal(
+          yield* settingsFor(SYNTHETIC_CLAUDE_CAPABLE_MODEL, [], { autoCompactWindow: "700000" }),
+          undefined,
+        );
+      }),
+    );
+
+    it.effect("forwards a custom-entry window even below the native window", () =>
+      Effect.gen(function* () {
+        assert.deepEqual(
+          yield* settingsFor(SYNTHETIC_CLAUDE_CAPABLE_MODEL, [], {
+            autoCompactWindow: "300000",
+            customModels: [{ slug: SYNTHETIC_CLAUDE_CAPABLE_MODEL, autoCompactWindow: "700000" }],
+          }),
+          { autoCompactWindow: 700000 },
+        );
+      }),
+    );
+
+    it.effect("applies a custom-entry window only to its own model", () =>
+      Effect.gen(function* () {
+        // The other model falls back to the global window under the
+        // does-not-lower rule, not the per-model 700000.
+        assert.deepEqual(
+          yield* settingsFor(
+            SYNTHETIC_CLAUDE_STANDARD_MODEL,
+            [{ id: "contextWindow", value: "standard" }],
+            {
+              autoCompactWindow: "300000",
+              customModels: [{ slug: SYNTHETIC_CLAUDE_CAPABLE_MODEL, autoCompactWindow: "700000" }],
+            },
+          ),
+          { autoCompactWindow: 300000 },
+        );
+      }),
+    );
   });
 
   it.effect("forwards claude effort levels into query options", () => {

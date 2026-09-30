@@ -607,6 +607,25 @@ function selectedClaudeContextWindow(
   return resolveClaudeCatalogContextWindowTokens(catalog, modelSelection);
 }
 
+// A bracketed context-window suffix in the model id (e.g. the "[1m]" in
+// "claude-opus-5[1m]") pins the model to that window even when the selected
+// catalog entry is a custom passthrough carrying no runtime profile. The
+// suffix-to-tokens mapping comes from the built-in profiles that define the
+// suffixes, so no window size is duplicated here.
+function claudeSuffixContextWindowTokens(
+  catalog: ClaudeModelCatalog,
+  modelId: string | undefined,
+): number | undefined {
+  if (!modelId) return undefined;
+  for (const entry of catalog.models) {
+    const suffixes = entry.runtime.modelSuffixes?.contextWindow ?? {};
+    for (const [optionId, suffix] of Object.entries(suffixes)) {
+      if (modelId.endsWith(suffix)) return entry.runtime.contextWindowTokens?.[optionId];
+    }
+  }
+  return undefined;
+}
+
 function finiteNonNegativeInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? Math.round(value)
@@ -4717,18 +4736,36 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         (launchArgSkipPermissions === null || launchArgSkipPermissions === "true"
           ? "bypassPermissions"
           : runtimeModeToPermission[input.runtimeMode]);
-      // A window is set per model, keyed by the model id the session runs as
+      // Priority: a window keyed by the model id the session runs as
       // (context-window suffix included, so a 1M variant has its own entry),
-      // or on the model's custom entry. A model with neither gets nothing
-      // forwarded and runs on Claude Code's default.
-      const autoCompactWindowSetting =
+      // then the model's custom entry, then the global window. The CLI clamps
+      // a settings window against the model's own context, so a small global
+      // value would cap every larger-window model: a 350k setting compacted
+      // 1M-context opus at ~318k while GLM routes escaped via router env. The
+      // global window is therefore forwarded only when it does not lower the
+      // model's native window; models with an unknown window (custom
+      // gateways) keep it, preserving their autocompact fallback. A per-model
+      // or custom-entry window wins and is always forwarded, even below the
+      // native window.
+      const perModelAutoCompactWindow =
         (apiModelId ? claudeSettings.autoCompactWindowByModel[apiModelId] : undefined) ||
         readCustomModelEntries(yield* customModelsEffect).find(
           (entry) => entry.slug === modelSelection?.model,
         )?.autoCompactWindow;
-      const autoCompactWindow = autoCompactWindowSetting
-        ? Number(autoCompactWindowSetting)
+      const globalAutoCompactWindow = claudeSettings.autoCompactWindow
+        ? Number(claudeSettings.autoCompactWindow)
         : undefined;
+      const nativeContextWindow =
+        initialContextWindow ??
+        claudeSuffixContextWindowTokens(modelCatalog, apiModelId ?? modelSelection?.model);
+      const autoCompactWindow =
+        perModelAutoCompactWindow !== undefined
+          ? Number(perModelAutoCompactWindow)
+          : nativeContextWindow === undefined ||
+              globalAutoCompactWindow === undefined ||
+              globalAutoCompactWindow >= nativeContextWindow
+            ? globalAutoCompactWindow
+            : undefined;
       const settings = {
         ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
         ...(fastMode ? { fastMode: true } : {}),

@@ -58,15 +58,13 @@ describe("ProviderSettingsForm helpers", () => {
     expect(fields.find((field) => field.key === "apiKey")?.control).toBe("password");
   });
 
-  it("keeps per-model compaction windows out of the Claude form", () => {
+  it("shows the global auto-compact field but not the per-model map for Claude", () => {
     const claude = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("claudeAgent")];
     expect(claude).toBeDefined();
 
-    expect(deriveProviderSettingsFields(claude!).map((field) => field.key)).toEqual([
-      "binaryPath",
-      "homePath",
-      "launchArgs",
-    ]);
+    const keys = deriveProviderSettingsFields(claude!).map((field) => field.key);
+    expect(keys).toEqual(["binaryPath", "homePath", "autoCompactWindow", "launchArgs"]);
+    expect(keys).not.toContain("autoCompactWindowByModel");
   });
 
   it("preserves unknown config keys while omitting empty configurable fields", () => {

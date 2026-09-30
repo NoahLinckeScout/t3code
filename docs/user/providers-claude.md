@@ -43,10 +43,11 @@ T3 Code uses the Claude configuration on the connected server.
 
 ## Compact long conversations
 
-Auto-compaction is set per model. Give a model a window between `100000` and
-`1000000` tokens and Claude summarizes the conversation at about that size; a
-model without one uses Claude Code's default. The window changes when
-compaction happens, not the model's context window.
+Compaction windows are integers between `100000` and `1000000` tokens: Claude
+summarizes the conversation at about that size. A window changes when
+compaction happens, not the model's context window. Set them per model; a model
+without one falls back to the provider's global window, then Claude Code's
+default.
 
 Set windows in `settings.json` under the Claude instance's
 `autoCompactWindowByModel`, keyed by the model id Claude runs, context-window
@@ -61,7 +62,14 @@ suffix included. A custom model's id is its slug:
 
 Here Claude Opus 5.5 compacts at 700,000 tokens with the 1M context window and
 at Claude Code's default with 200k. A custom model entry can also carry its own
-**Auto-compact window** in the instance's model list.
+**Auto-compact window** in the instance's model list. Priority: the per-model
+map, then the custom model entry, then the global window.
+
+The upstream **Auto-compact after** field in the Claude provider settings still
+works as the global fallback. The CLI compacts within the model's own context
+window, so a global value below a model's context window is ignored for that
+model rather than capping it — to compact a large-window model earlier, give
+that model a per-model or custom-entry window, which always applies.
 
 You can also send `/compact` in an existing conversation. Web and desktop offer
 **Compact context** from the context meter and may suggest it when you return to

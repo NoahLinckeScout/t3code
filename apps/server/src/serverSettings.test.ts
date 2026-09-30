@@ -238,6 +238,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         homePath: "",
         customModels: ["claude-custom"],
         launchArgs: "",
+        autoCompactWindow: "",
         autoCompactWindowByModel: {},
       });
       assert.deepEqual(
@@ -947,6 +948,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         homePath: "",
         customModels: [],
         launchArgs: "",
+        autoCompactWindow: "",
         autoCompactWindowByModel: {},
       });
       assert.deepEqual(next.providers.opencode, {
