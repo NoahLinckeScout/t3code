@@ -20,6 +20,8 @@ import {
 } from "../auth/http.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
+import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
+import { findUnknownModelSelection } from "./modelAvailability.ts";
 
 export const orchestrationHttpApiLayer = HttpApiBuilder.group(
   EnvironmentHttpApi,
@@ -28,6 +30,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
     const clientCommandDispatch = yield* ClientOrchestrationCommandDispatch;
     const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
+    const providerRegistry = yield* ProviderRegistry;
 
     return handlers
       .handle(
@@ -104,6 +107,13 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
               failEnvironmentInternal("orchestration_dispatch_failed", cause),
             ),
           );
+          const unknownModel = findUnknownModelSelection(
+            args.payload,
+            yield* providerRegistry.getProviders,
+          );
+          if (unknownModel !== null) {
+            return yield* failEnvironmentInvalidRequest("unknown_model", unknownModel);
+          }
           const normalizedCommand = yield* normalizeDispatchCommand(args.payload).pipe(
             Effect.catch(() => failEnvironmentInvalidRequest("invalid_command")),
           );

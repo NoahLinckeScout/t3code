@@ -115,7 +115,7 @@ describe("ProviderModelPicker", () => {
   );
 
   it.each(["codex", "claudeAgent", "cursor", "grok"])(
-    "uses the first option label for a missing %s model",
+    "labels a missing %s model by its own slug, not the first option",
     (driver) => {
       const markup = renderPicker({
         instanceId: `${driver}_work`,
@@ -124,8 +124,8 @@ describe("ProviderModelPicker", () => {
         options: [{ slug: "fallback-model", name: "Fallback model" }],
       });
 
-      expect(markup).toContain("Fallback model");
-      expect(markup).not.toContain(">missing-model<");
+      expect(markup).toContain(">missing-model<");
+      expect(markup).not.toContain("Fallback model");
     },
   );
 
@@ -144,7 +144,7 @@ describe("ProviderModelPicker", () => {
     expect(markup).not.toContain("Fallback model");
   });
 
-  it("uses the first option when the active instance entry is missing", () => {
+  it("labels the selected slug when the active instance entry is missing", () => {
     const markup = renderPicker({
       instanceId: "missing_instance",
       driver: "opencode",
@@ -153,8 +153,8 @@ describe("ProviderModelPicker", () => {
       includeEntry: false,
     });
 
-    expect(markup).toContain("Fallback model");
-    expect(markup).not.toContain(">missing-model<");
+    expect(markup).toContain(">missing-model<");
+    expect(markup).not.toContain("Fallback model");
   });
 
   it("keeps instance initials visible in the resting trigger", () => {

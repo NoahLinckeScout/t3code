@@ -67,6 +67,7 @@ export const EnvironmentRequestInvalidReason = Schema.Literals([
   "invalid_scope",
   "scope_not_granted",
   "invalid_command",
+  "unknown_model",
 ]);
 export type EnvironmentRequestInvalidReason = typeof EnvironmentRequestInvalidReason.Type;
 
@@ -104,6 +105,7 @@ export class EnvironmentRequestInvalidError extends Schema.TaggedError<Environme
   {
     code: Schema.Literal("invalid_request"),
     reason: EnvironmentRequestInvalidReason,
+    detail: Schema.optional(TrimmedNonEmptyString),
     traceId: TrimmedNonEmptyString,
   },
   { httpApiStatus: 400 },
@@ -113,7 +115,7 @@ export class EnvironmentRequestInvalidError extends Schema.TaggedError<Environme
   }
 
   override get message(): string {
-    return `The environment rejected the request (${this.reason}).`;
+    return `The environment rejected the request (${this.reason})${this.detail ? `: ${this.detail}` : "."}`;
   }
 }
 

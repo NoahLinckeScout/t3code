@@ -3,6 +3,7 @@ import { defaultAnimateLayoutChanges, type AnimateLayoutChanges } from "@dnd-kit
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
 import {
+  getThreadModelLabel,
   animateSidebarLayoutChanges,
   applySidebarThreadDrop,
   archiveSelectedThreadEntries,
@@ -56,6 +57,7 @@ import {
   OrchestrationLatestTurn,
   ProjectId,
   ProviderInstanceId,
+  type ServerProviderModel,
   ThreadId,
 } from "@t3tools/contracts";
 
@@ -2541,4 +2543,49 @@ describe("navigation after parking a thread", () => {
       ).toBe(expected);
     },
   );
+});
+
+describe("getThreadModelLabel", () => {
+  const instanceId = ProviderInstanceId.make("claudeAgent");
+  const opus: ServerProviderModel = {
+    slug: "claude-opus-5-5",
+    name: "Claude Opus 5.5",
+    isCustom: false,
+    capabilities: {
+      optionDescriptors: [
+        {
+          id: "contextWindow",
+          label: "Context Window",
+          type: "select",
+          options: [
+            { id: "200k", label: "200k" },
+            { id: "1m", label: "1M", isDefault: true },
+          ],
+        },
+      ],
+    },
+  };
+
+  it("adds the selected context window to the model name", () => {
+    expect(
+      getThreadModelLabel([opus], {
+        instanceId,
+        model: "claude-opus-5-5",
+        options: [{ id: "contextWindow", value: "1m" }],
+      }),
+    ).toBe("Claude Opus 5.5 · 1M");
+    expect(
+      getThreadModelLabel([opus], {
+        instanceId,
+        model: "claude-opus-5-5",
+        options: [{ id: "contextWindow", value: "200k" }],
+      }),
+    ).toBe("Claude Opus 5.5 · 200k");
+  });
+
+  it("shows an unlisted model as its own slug", () => {
+    expect(getThreadModelLabel([opus], { instanceId, model: "glm-5.3-flash-or" })).toBe(
+      "glm-5.3-flash-or",
+    );
+  });
 });

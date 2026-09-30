@@ -42,6 +42,7 @@ import * as DelegationStoreLayer from "./mcp/toolkits/orchestration/DelegationSt
 import * as OrchestrationRolesLayer from "./mcp/toolkits/orchestration/roles.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import { orchestrationHttpApiLayer } from "./orchestration/http.ts";
+import { ProviderRegistry } from "./provider/Services/ProviderRegistry.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "./persistence/Layers/OrchestrationCommandReceipts.ts";
@@ -376,6 +377,7 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
               discard: () => Effect.void,
             }),
           ),
+          Layer.provide(Layer.mock(ProviderRegistry)({ getProviders: Effect.succeed([]) })),
         ),
       ),
       Layer.provide(environmentAuthenticatedAuthLayer),

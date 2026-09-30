@@ -54,7 +54,7 @@ import {
 } from "@t3tools/shared/dpop";
 import { RELAY_HEALTH_REQUEST_TYP, RELAY_MINT_REQUEST_TYP } from "@t3tools/shared/relayJwt";
 import * as RelayClient from "@t3tools/shared/relayClient";
-import { assert, it } from "@effect/vitest";
+import { assert, describe, it } from "@effect/vitest";
 import { assertFailure, assertInclude, assertTrue } from "@effect/vitest/utils";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
@@ -7343,6 +7343,129 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
+
+  describe("unknown model selections", () => {
+    const claudeInstanceId = ProviderInstanceId.make("claudeAgent");
+    const claudeProviders = [
+      {
+        instanceId: claudeInstanceId,
+        driver: ProviderDriverKind.make("claudeAgent"),
+        enabled: true,
+        installed: true,
+        version: "1.0.0",
+        status: "ready" as const,
+        auth: { status: "authenticated" as const },
+        checkedAt: "2026-04-11T00:00:00.000Z",
+        models: [
+          {
+            slug: "claude-fable-5-1",
+            name: "Claude Fable 5.1",
+            isCustom: false,
+            capabilities: null,
+          },
+          { slug: "glm-5.3-flash", name: "glm-5.3-flash", isCustom: true, capabilities: null },
+        ],
+        slashCommands: [],
+        skills: [],
+      },
+    ] as const;
+    const claudeThreadCreate = (model: string) =>
+      ({
+        type: "thread.create",
+        commandId: CommandId.make(`cmd-create-${model}`),
+        threadId: ThreadId.make(`thread-${model}`),
+        projectId: defaultProjectId,
+        title: "Model check",
+        modelSelection: { instanceId: claudeInstanceId, model },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }) as const;
+    const buildWithClaude = (dispatched: Array<string>) =>
+      buildAppUnderTest({
+        layers: {
+          providerRegistry: { getProviders: Effect.succeed(claudeProviders) },
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatched.push(command.commandId);
+                return { sequence: 1 };
+              }),
+          },
+        },
+      });
+
+    it.effect("rejects an HTTP dispatch naming a model the instance does not list", () =>
+      Effect.gen(function* () {
+        const dispatched: Array<string> = [];
+        yield* buildWithClaude(dispatched);
+        const cookie = yield* getAuthenticatedSessionCookieHeader();
+        const post = (model: string) =>
+          Effect.gen(function* () {
+            return yield* fetchEffect(yield* getHttpServerUrl("/api/orchestration/dispatch"), {
+              method: "POST",
+              headers: { cookie, "content-type": "application/json" },
+              body: jsonRequestBody(claudeThreadCreate(model)),
+            });
+          });
+
+        const rejected = yield* post("glm-5.3-flash-or");
+        const body = yield* responseJsonEffect<{
+          readonly reason: string;
+          readonly detail?: string;
+        }>(rejected);
+        assert.equal(rejected.status, 400);
+        assert.equal(body.reason, "unknown_model");
+        assert.include(body.detail ?? "", "glm-5.3-flash-or");
+
+        const accepted = yield* post("glm-5.3-flash");
+        assert.equal(accepted.status, 200);
+        assert.deepEqual(dispatched, ["cmd-create-glm-5.3-flash"]);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    );
+
+    it.effect("rejects a websocket turn whose model the instance does not list", () =>
+      Effect.gen(function* () {
+        const dispatched: Array<string> = [];
+        yield* buildWithClaude(dispatched);
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const turnStart = (model: string) =>
+          ({
+            type: "thread.turn.start",
+            commandId: CommandId.make(`cmd-turn-${model}`),
+            threadId: defaultThreadId,
+            message: {
+              messageId: MessageId.make(`msg-${model}`),
+              role: "user",
+              text: "approve",
+              attachments: [],
+            },
+            modelSelection: { instanceId: claudeInstanceId, model },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt: "2026-01-01T00:00:00.000Z",
+          }) as const;
+
+        yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            Effect.gen(function* () {
+              const rejected = yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand](
+                turnStart("glm-5.3-flash-or"),
+              ).pipe(Effect.flip);
+              assert.include(rejected.message, "no model 'glm-5.3-flash-or'");
+
+              yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand](
+                turnStart("claude-fable-5-1"),
+              );
+            }),
+          ),
+        );
+        assert.deepEqual(dispatched, ["cmd-turn-claude-fable-5-1"]);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    );
+  });
 
   it.effect("records thread analytics only after a client command succeeds", () =>
     Effect.gen(function* () {
