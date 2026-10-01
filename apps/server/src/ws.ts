@@ -102,7 +102,10 @@ import {
   cleanupFailedUploadedAttachments,
   normalizeDispatchCommand,
 } from "./orchestration/Normalizer.ts";
-import { findUnknownModelSelection } from "./orchestration/modelAvailability.ts";
+import {
+  claudeCustomModelsByInstance,
+  findUnknownModelSelection,
+} from "./orchestration/modelAvailability.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ClientOrchestrationCommandDispatchModule from "./orchestration/Services/ClientOrchestrationCommandDispatch.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -1892,9 +1895,17 @@ const makeWsRpcLayer = (
               const unknownModel = findUnknownModelSelection(
                 command,
                 yield* providerRegistry.getProviders,
+                // The registry snapshot trails a just-saved customModels edit;
+                // the settings themselves are current.
+                claudeCustomModelsByInstance(
+                  yield* serverSettings.getSettings.pipe(Effect.orElseSucceed(() => null)),
+                ),
               );
               if (unknownModel !== null) {
-                return yield* new OrchestrationDispatchCommandError({ message: unknownModel });
+                return yield* new OrchestrationDispatchCommandError({
+                  message: unknownModel,
+                  reason: "unknown_model",
+                });
               }
               const normalizedCommand = yield* normalizeDispatchCommand(command);
               // Archive removes the thread from the client, so this transport

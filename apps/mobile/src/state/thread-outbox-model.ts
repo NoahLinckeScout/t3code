@@ -1,4 +1,7 @@
-import { isTransportConnectionErrorMessage } from "@t3tools/client-runtime/errors";
+import {
+  isTransportConnectionErrorMessage,
+  isUnknownModelSelectionError,
+} from "@t3tools/client-runtime/errors";
 import {
   clampFileAttachmentUploadBytes,
   fileAttachmentTooLargeMessage,
@@ -290,6 +293,15 @@ export function resolveThreadOutboxFailureAction(input: {
   readonly error: unknown;
   readonly interrupted: boolean;
 }): ThreadOutboxFailureAction {
+  // An unknown-model rejection is the server refusing this payload's model
+  // selection, permanently: retrying cannot succeed, and the queued message
+  // would block everything behind it in the thread. The user must pick again,
+  // so restore for correction even at the settings-sync stage. Other
+  // settings-sync rejections are transient (a clone in progress, an echo of a
+  // race the next attempt settles) and stay queued.
+  if (isUnknownModelSelectionError(input.error)) {
+    return "restore";
+  }
   if (
     input.stage === "settings-sync" ||
     input.interrupted ||

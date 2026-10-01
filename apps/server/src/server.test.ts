@@ -3,6 +3,7 @@ import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeCrypto from "node:crypto";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 
 import {
   type DeviceServiceState,
@@ -7929,7 +7930,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         worktreePath: null,
         createdAt: "2026-01-01T00:00:00.000Z",
       }) as const;
-    const buildWithClaude = (dispatched: Array<string>) =>
+    const buildWithClaude = (
+      dispatched: Array<string>,
+      serverSettings?: Partial<ServerSettings.ServerSettingsService["Service"]>,
+    ) =>
       buildAppUnderTest({
         layers: {
           providerRegistry: { getProviders: Effect.succeed(claudeProviders) },
@@ -7940,6 +7944,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 return { sequence: 1 };
               }),
           },
+          ...(serverSettings ? { serverSettings } : {}),
         },
       });
 
@@ -8001,6 +8006,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 turnStart("glm-5.3-flash-or"),
               ).pipe(Effect.flip);
               assert.include(rejected.message, "no model 'glm-5.3-flash-or'");
+              assert.equal(
+                rejected._tag === "OrchestrationDispatchCommandError" ? rejected.reason : undefined,
+                "unknown_model",
+              );
 
               yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand](
                 turnStart("claude-fable-5-1"),
@@ -8009,6 +8018,73 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           ),
         );
         assert.deepEqual(dispatched, ["cmd-turn-claude-fable-5-1"]);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    );
+
+    it.effect("accepts a turn for a custom model the settings just added", () =>
+      Effect.gen(function* () {
+        const dispatched: Array<string> = [];
+        // A real settings service over a temp dir is heavy; an in-memory one
+        // that actually applies patches reproduces the race: the write lands,
+        // the registry snapshot (mocked above) never hears about it.
+        const settingsRef = yield* Ref.make(DEFAULT_SERVER_SETTINGS);
+        yield* buildWithClaude(dispatched, {
+          getSettings: Ref.get(settingsRef),
+          updateSettings: (patch) =>
+            Ref.getAndUpdate(settingsRef, (current) => applyServerSettingsPatch(current, patch)),
+        });
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const turnStart = (model: string) =>
+          ({
+            type: "thread.turn.start",
+            commandId: CommandId.make(`cmd-turn-${model}`),
+            threadId: defaultThreadId,
+            message: {
+              messageId: MessageId.make(`msg-${model}`),
+              role: "user",
+              text: "approve",
+              attachments: [],
+            },
+            modelSelection: { instanceId: claudeInstanceId, model },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt: "2026-01-01T00:00:00.000Z",
+          }) as const;
+
+        yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            Effect.gen(function* () {
+              // The registry snapshot never lists the new row: a
+              // customModels-only edit spares the instance a rebuild, so the
+              // aggregated list updates asynchronously. The settings the edit
+              // just landed in are current, and an immediate send must be
+              // validated against them instead of rejected.
+              yield* client[WS_METHODS.serverUpdateSettings]({
+                patch: {
+                  providerInstances: {
+                    [claudeInstanceId]: {
+                      driver: ProviderDriverKind.make("claudeAgent"),
+                      config: { customModels: ["brand-new-custom"] },
+                    },
+                  },
+                },
+              });
+
+              yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand](
+                turnStart("brand-new-custom"),
+              );
+
+              const rejected = yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand](
+                turnStart("glm-5.3-flash-or"),
+              ).pipe(Effect.flip);
+              assert.equal(
+                rejected._tag === "OrchestrationDispatchCommandError" ? rejected.reason : undefined,
+                "unknown_model",
+              );
+            }),
+          ),
+        );
+        assert.deepEqual(dispatched, ["cmd-turn-brand-new-custom"]);
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
     );
   });

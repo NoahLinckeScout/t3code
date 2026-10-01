@@ -4,13 +4,16 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ServerSettings as ServerSettingsSchema,
   type ClientOrchestrationCommand,
   type ServerProvider,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
+import type { CustomModelDefinition } from "@t3tools/shared/model";
 import { describe, expect, it } from "vite-plus/test";
 
-import { findUnknownModelSelection } from "./modelAvailability.ts";
+import { claudeCustomModelsByInstance, findUnknownModelSelection } from "./modelAvailability.ts";
 
 const claude = ProviderInstanceId.make("claudeAgent");
 const cursor = ProviderInstanceId.make("cursor");
@@ -124,5 +127,87 @@ describe("findUnknownModelSelection", () => {
         providers,
       ),
     ).toBeNull();
+  });
+
+  describe("with settings custom models", () => {
+    const brandNew: CustomModelDefinition = {
+      slug: "brand-new-custom",
+      name: "Brand New Custom",
+      capabilities: null,
+      autoCompactWindow: null,
+    };
+
+    it("accepts a model the settings grant while the snapshot still trails", () => {
+      expect(
+        findUnknownModelSelection(
+          turnStart({ instanceId: claude, model: "brand-new-custom" }),
+          providers,
+          new Map([[claude, [brandNew]]]),
+        ),
+      ).toBeNull();
+    });
+
+    it("still rejects a model neither the snapshot nor the settings list", () => {
+      expect(
+        findUnknownModelSelection(
+          turnStart({ instanceId: claude, model: "glm-5.3-flash-or" }),
+          providers,
+          new Map([[claude, [brandNew]]]),
+        ),
+      ).toContain("no model 'glm-5.3-flash-or'");
+    });
+
+    it("ignores custom models granted to a different instance", () => {
+      expect(
+        findUnknownModelSelection(
+          turnStart({ instanceId: claude, model: "brand-new-custom" }),
+          providers,
+          new Map([[cursor, [brandNew]]]),
+        ),
+      ).toContain("no model 'brand-new-custom'");
+    });
+  });
+
+  describe("claudeCustomModelsByInstance", () => {
+    // Decoding fills the schema defaults, so a two-field override is a
+    // complete settings snapshot.
+    const decodeSettings = Schema.decodeSync(ServerSettingsSchema);
+
+    it("resolves explicit instance entries over the legacy mirror", () => {
+      const settings = decodeSettings({
+        providerInstances: {
+          claudeAgent: { driver: "claudeAgent", config: { customModels: ["explicit-model"] } },
+        },
+        providers: { claudeAgent: { customModels: ["legacy-model"] } },
+      });
+      const byInstance = claudeCustomModelsByInstance(settings);
+      expect(
+        [...(byInstance.get(ProviderInstanceId.make("claudeAgent")) ?? [])].map(
+          (entry) => entry.slug,
+        ),
+      ).toEqual(["explicit-model"]);
+    });
+
+    it("mirrors legacy providers.claudeAgent customModels for the default instance", () => {
+      const settings = decodeSettings({
+        providers: { claudeAgent: { customModels: ["legacy-model"] } },
+      });
+      expect(
+        [
+          ...(claudeCustomModelsByInstance(settings).get(ProviderInstanceId.make("claudeAgent")) ??
+            []),
+        ].map((entry) => entry.slug),
+      ).toEqual(["legacy-model"]);
+    });
+
+    it("drops rows for other drivers and empty settings", () => {
+      const settings = decodeSettings({
+        providerInstances: {
+          cursor: { driver: "cursor", config: { customModels: ["not-claude"] } },
+        },
+      });
+      expect(claudeCustomModelsByInstance(settings).size).toBe(0);
+      expect(claudeCustomModelsByInstance(null).size).toBe(0);
+    });
   });
 });
