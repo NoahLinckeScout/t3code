@@ -4,6 +4,31 @@ T3 Code is an "agent harness control surface". It enables control of the agents 
 
 Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCode, and Google Antigravity. If they're set up on your computer, T3 Code can control them.
 
+## What this fork adds
+
+NoahLinckeScout/t3code tracks pingdotgg/t3code releases and adds only the
+features below. Each one is its own PR, and each one is offered upstream where
+that makes sense.
+
+- **Agent orchestration tools**: `agent_spawn`, `agent_handoff`, `agent_message`,
+  `agent_inbox` MCP tools, so a thread can start child threads by role and be
+  woken when they finish. (#1, #6, #7)
+- **Settings edits spare live sessions** when only the model list changes. (#14)
+- **Per-model auto-compact window** for Claude models, keyed by the model id
+  the session runs as. (#16, #19, #21)
+- **No silent model swaps**: a thread never falls back to the default model;
+  unknown Claude models are rejected. (#20)
+- **Thread id in the environment** of every spawned provider session
+  (`T3_THREAD_ID`). (#15)
+- **One server per data directory.** (#4, upstream pingdotgg/t3code#8442)
+- Bug fixes: transport-error turn accounting (#2), ACP sub-agent classification
+  (#3), OpenCode MCP attachment refusals (#5), queued-message drain (#18).
+
+**Upstream sync:** merged from each upstream stable release. The fork never
+renames or removes an upstream setting, and fork database migrations use their
+own id range (9000+) so upstream migrations are never skipped.
+**Base:** upstream v0.0.42.
+
 ## "Wait, what are you selling me?"
 
 Nothing. We built T3 Code because we wanted the best possible development experience with agents. We were inspired by existing solutions like the Codex desktop app, Conductor, Claude Desktop and Cursor Glass, but none met our bar.
