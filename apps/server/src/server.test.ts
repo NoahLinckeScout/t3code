@@ -7971,9 +7971,18 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.equal(body.reason, "unknown_model");
         assert.include(body.detail ?? "", "glm-5.3-flash-or");
 
-        const accepted = yield* post("glm-5.3-flash");
+        // The fixture lists glm-5.3-flash as a snapshot custom row the
+        // default settings never grant: that is the cross-device removal
+        // race, and readable settings must reject the stale row instead of
+        // dispatching it. Built-ins stay snapshot-authoritative.
+        const staleCustom = yield* post("glm-5.3-flash");
+        assert.equal(staleCustom.status, 400);
+        const staleBody = yield* responseJsonEffect<{ readonly reason: string }>(staleCustom);
+        assert.equal(staleBody.reason, "unknown_model");
+
+        const accepted = yield* post("claude-fable-5-1");
         assert.equal(accepted.status, 200);
-        assert.deepEqual(dispatched, ["cmd-create-glm-5.3-flash"]);
+        assert.deepEqual(dispatched, ["cmd-create-claude-fable-5-1"]);
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
     );
 

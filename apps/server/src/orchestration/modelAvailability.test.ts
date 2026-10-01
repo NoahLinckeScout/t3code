@@ -22,6 +22,7 @@ function provider(
   instanceId: ProviderInstanceId,
   driver: string,
   slugs: ReadonlyArray<string>,
+  customSlugs: ReadonlyArray<string> = [],
 ): ServerProvider {
   return {
     instanceId,
@@ -32,13 +33,21 @@ function provider(
     status: "ready",
     auth: { status: "authenticated" },
     checkedAt: "2026-09-30T00:00:00.000Z",
-    models: slugs.map((slug) => ({
-      slug,
-      name: slug,
-      isCustom: false,
-      capabilities: null,
-      ...(slug === "claude-fable-5-1" ? { aliases: ["fable"] } : {}),
-    })),
+    models: [
+      ...slugs.map((slug) => ({
+        slug,
+        name: slug,
+        isCustom: false,
+        capabilities: null,
+        ...(slug === "claude-fable-5-1" ? { aliases: ["fable"] } : {}),
+      })),
+      ...customSlugs.map((slug) => ({
+        slug,
+        name: slug,
+        isCustom: true,
+        capabilities: null,
+      })),
+    ],
     slashCommands: [],
     skills: [],
   };
@@ -46,6 +55,14 @@ function provider(
 
 const providers = [
   provider(claude, "claudeAgent", ["claude-fable-5-1", "glm-5.3-flash"]),
+  provider(cursor, "cursor", []),
+];
+
+// The aggregated snapshot still lists a custom row the readable settings no
+// longer grant: it was removed on another device before the spared rebuild
+// refreshed the snapshot.
+const staleCustomProviders = [
+  provider(claude, "claudeAgent", ["claude-fable-5-1", "glm-5.3-flash"], ["removed-elsewhere"]),
   provider(cursor, "cursor", []),
 ];
 
@@ -168,6 +185,80 @@ describe("findUnknownModelSelection", () => {
     });
   });
 
+  describe("with a snapshot custom row the settings no longer grant", () => {
+    const removed = (grant: boolean): ReadonlyMap<ProviderInstanceId, CustomModelDefinition[]> =>
+      grant
+        ? new Map([
+            [
+              claude,
+              [
+                {
+                  slug: "removed-elsewhere",
+                  name: "Removed Elsewhere",
+                  capabilities: null,
+                  autoCompactWindow: null,
+                },
+              ],
+            ],
+          ])
+        : new Map([[claude, []]]);
+
+    it("still rejects the stale row when readable settings no longer grant it", () => {
+      expect(
+        findUnknownModelSelection(
+          turnStart({ instanceId: claude, model: "removed-elsewhere" }),
+          staleCustomProviders,
+          removed(false),
+        ),
+      ).toContain("no model 'removed-elsewhere'");
+    });
+
+    it("keeps accepting built-ins the snapshot lists without a settings grant", () => {
+      expect(
+        findUnknownModelSelection(
+          turnStart({ instanceId: claude, model: "fable" }),
+          staleCustomProviders,
+          removed(false),
+        ),
+      ).toBeNull();
+    });
+
+    it("accepts the row once the settings grant it again", () => {
+      expect(
+        findUnknownModelSelection(
+          turnStart({ instanceId: claude, model: "removed-elsewhere" }),
+          staleCustomProviders,
+          removed(true),
+        ),
+      ).toBeNull();
+    });
+
+    it("degrades to the registry-only check when the settings read failed", () => {
+      expect(
+        findUnknownModelSelection(
+          turnStart({ instanceId: claude, model: "removed-elsewhere" }),
+          staleCustomProviders,
+        ),
+      ).toBeNull();
+      expect(
+        findUnknownModelSelection(
+          turnStart({ instanceId: claude, model: "removed-elsewhere" }),
+          staleCustomProviders,
+          new Map(),
+        ),
+      ).toBeNull();
+    });
+
+    it("still rejects a model the degraded registry does not list", () => {
+      expect(
+        findUnknownModelSelection(
+          turnStart({ instanceId: claude, model: "glm-5.3-flash-or" }),
+          staleCustomProviders,
+        ),
+      ).toContain("no model 'glm-5.3-flash-or'");
+    });
+  });
+
   describe("claudeCustomModelsByInstance", () => {
     // Decoding fills the schema defaults, so a two-field override is a
     // complete settings snapshot.
@@ -200,14 +291,25 @@ describe("findUnknownModelSelection", () => {
       ).toEqual(["legacy-model"]);
     });
 
-    it("drops rows for other drivers and empty settings", () => {
+    it("drops rows for other drivers and failed reads", () => {
       const settings = decodeSettings({
         providerInstances: {
           cursor: { driver: "cursor", config: { customModels: ["not-claude"] } },
         },
       });
-      expect(claudeCustomModelsByInstance(settings).size).toBe(0);
+      const byInstance = claudeCustomModelsByInstance(settings);
+      expect(byInstance.size).toBe(1);
+      expect(byInstance.has(ProviderInstanceId.make("cursor"))).toBe(false);
       expect(claudeCustomModelsByInstance(null).size).toBe(0);
+    });
+
+    it("pins the default instance even when the legacy mirror is empty", () => {
+      // Presence is what tells `findUnknownModelSelection` the settings were
+      // read (and grant nothing) rather than failed to read.
+      const settings = decodeSettings({});
+      expect(
+        claudeCustomModelsByInstance(settings).get(ProviderInstanceId.make("claudeAgent")),
+      ).toEqual([]);
     });
   });
 });
