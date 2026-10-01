@@ -27,7 +27,7 @@ that makes sense.
 **Upstream sync:** merged from each upstream stable release. The fork never
 renames or removes an upstream setting, and fork database migrations use their
 own id range (9000+) so upstream migrations are never skipped.
-**Base:** upstream v0.0.42.
+**Base:** upstream v0.0.44.
 
 ## "Wait, what are you selling me?"
 

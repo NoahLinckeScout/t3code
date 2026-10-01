@@ -175,13 +175,14 @@ const makeMigrationLoader = (throughId?: number) =>
  * exact name match keeps this a no-op on databases where upstream's 053 has
  * already run.
  *
- * The same databases may also carry an orphaned upstream 054 record: an
- * intermediate fork build that kept the stale 053 slot and appended upstream's
- * 054 ran 054 above it without ever applying 053. Once the stale slot is
- * cleared, that record's insert would collide with its primary key and the
- * migrator would refuse to start, so drop it too and let both migrations run
- * in order — 053 creates its table if missing and 054 re-checks its column,
- * so re-running them is safe.
+ * The same databases may also carry an orphaned upstream 054 record: a binary
+ * carrying upstream's migration list (the stock v0.0.44 release build does
+ * this) matched the table's rows by id, found 53 occupied, and ran 054 above
+ * it without ever applying 053. Once the stale slot is cleared, that record's
+ * insert would collide with its primary key and the migrator would refuse to
+ * start, so drop it too and let both migrations run in order — 053 creates
+ * its table if missing and 054 re-checks its column, so re-running them is
+ * safe.
  */
 const repairStaleForkMigration53 = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
