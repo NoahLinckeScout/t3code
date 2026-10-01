@@ -91,14 +91,17 @@ export interface AppModelOption {
   isUnavailable?: boolean;
 }
 
-function appendUnavailableDynamicModelSelection(
+// A thread keeps the model it was created with even when the instance no
+// longer lists it (a removed custom slug, an account catalog gap). Listing it
+// as unavailable lets the picker show what the thread actually runs instead of
+// whichever option happens to be first.
+function appendUnavailableModelSelection(
   options: AppModelOption[],
   rawModels: ReadonlyArray<ServerProvider["models"][number]>,
   provider: ProviderDriverKind,
   selectedModel: string | null | undefined,
   hiddenModels: ReadonlyArray<string>,
 ): AppModelOption[] {
-  if (provider !== "opencode" && provider !== "antigravity") return options;
   const slug = normalizeCustomModelSlug(selectedModel);
   if (!slug) return options;
   if (provider === "antigravity" && slug === ANTIGRAVITY_DEFAULT_MODEL) return options;
@@ -107,7 +110,7 @@ function appendUnavailableDynamicModelSelection(
   // because the user hid it. Keep that preference authoritative.
   if (resolveSelectableModel(provider, slug, rawModels) !== null) return options;
   if (hiddenModels.includes(slug)) return options;
-  if (options.some((option) => option.slug === slug)) return options;
+  if (resolveSelectableModel(provider, slug, options) !== null) return options;
 
   return [...options, { slug, name: slug, isCustom: false, isUnavailable: true }];
 }
@@ -215,7 +218,7 @@ function getAppModelOptions(
   }
 
   const preferences = readInstanceModelPreferences(settings, defaultInstanceId);
-  return appendUnavailableDynamicModelSelection(
+  return appendUnavailableModelSelection(
     applyInstanceModelPreferences(options, preferences),
     rawModels,
     provider,
@@ -263,7 +266,7 @@ export function getAppModelOptionsForInstance(
   }
 
   const preferences = readInstanceModelPreferences(settings, entry.instanceId);
-  return appendUnavailableDynamicModelSelection(
+  return appendUnavailableModelSelection(
     applyInstanceModelPreferences(options, preferences),
     entry.models,
     entry.driverKind,
@@ -306,20 +309,19 @@ export function resolveAppModelSelectionForInstance(
   if (resolvedSelection) {
     return resolvedSelection;
   }
+  // Never trade a stored selection for the instance default: the default can be
+  // a different, pricier model, and the swap would be written back to the
+  // thread on the next send. An unknown slug is sent as-is so the server can
+  // refuse it by name.
+  const storedSelection = normalizeCustomModelSlug(selectedModel);
   if (
     resolutionOptions?.preserveUnavailableSelection &&
-    (entry.driverKind === "opencode" || entry.driverKind === "antigravity")
+    storedSelection &&
+    (entry.driverKind !== "antigravity" || storedSelection !== ANTIGRAVITY_DEFAULT_MODEL)
   ) {
-    const unavailableSelection = normalizeCustomModelSlug(selectedModel);
-    const hiddenModels = readInstanceModelPreferences(settings, entry.instanceId).hiddenModels;
-    if (
-      unavailableSelection &&
-      !hiddenModels.includes(unavailableSelection) &&
-      resolveSelectableModel(entry.driverKind, selectedModel, entry.models) === null &&
-      (entry.driverKind !== "antigravity" || unavailableSelection !== ANTIGRAVITY_DEFAULT_MODEL)
-    ) {
-      return unavailableSelection;
-    }
+    return (
+      resolveSelectableModel(entry.driverKind, storedSelection, entry.models) ?? storedSelection
+    );
   }
   return options.find((option) => option.isDefault)?.slug ?? options[0]?.slug ?? null;
 }

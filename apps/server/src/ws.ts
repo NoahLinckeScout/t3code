@@ -99,6 +99,7 @@ import {
   cleanupFailedUploadedAttachments,
   normalizeDispatchCommand,
 } from "./orchestration/Normalizer.ts";
+import { findUnknownModelSelection } from "./orchestration/modelAvailability.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ClientOrchestrationCommandDispatchModule from "./orchestration/Services/ClientOrchestrationCommandDispatch.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -1829,6 +1830,13 @@ const makeWsRpcLayer = (
             ORCHESTRATION_WS_METHODS.dispatchCommand,
             Effect.gen(function* () {
               yield* ProjectCloneTracker.rejectCommandsDuringClone(projectCloneTracker, command);
+              const unknownModel = findUnknownModelSelection(
+                command,
+                yield* providerRegistry.getProviders,
+              );
+              if (unknownModel !== null) {
+                return yield* new OrchestrationDispatchCommandError({ message: unknownModel });
+              }
               const normalizedCommand = yield* normalizeDispatchCommand(command);
               // Archive removes the thread from the client, so this transport
               // closes its session and terminals after the command lands.

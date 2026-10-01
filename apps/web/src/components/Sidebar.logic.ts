@@ -5,7 +5,8 @@ import {
   isAtomCommandInterrupted,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
-import type { ContextMenuItem } from "@t3tools/contracts";
+import type { ContextMenuItem, ModelSelection, ServerProviderModel } from "@t3tools/contracts";
+import { getProviderOptionCurrentLabel, getProviderOptionDescriptors } from "@t3tools/shared/model";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
 import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
@@ -24,6 +25,7 @@ import {
 import type { SidebarThreadSummary, Thread } from "../types";
 import { cn } from "../lib/utils";
 import { isLatestTurnSettled } from "../session-logic";
+import { getTriggerDisplayModelLabel } from "./chat/providerIconUtils";
 
 export function shouldNavigateAfterThreadPark(input: {
   readonly threadKey: string;
@@ -1250,4 +1252,24 @@ export function sortScopedProjectsForSidebar<
       left.environmentId.localeCompare(right.environmentId) ||
       left.id.localeCompare(right.id),
   );
+}
+
+/**
+ * Label a thread's model the way it runs: the catalog name plus the selected
+ * context window ("Claude Opus 5.5 · 1M"), or the bare slug when the instance
+ * does not list the model.
+ */
+export function getThreadModelLabel(
+  models: ReadonlyArray<ServerProviderModel> | undefined,
+  selection: ModelSelection,
+): string {
+  const model = models?.find((candidate) => candidate.slug === selection.model);
+  if (!model) return selection.model;
+  const contextWindow = getProviderOptionDescriptors({
+    caps: model.capabilities ?? { optionDescriptors: [] },
+    selections: selection.options,
+  }).find((descriptor) => descriptor.id === "contextWindow");
+  const windowLabel = getProviderOptionCurrentLabel(contextWindow);
+  const name = getTriggerDisplayModelLabel(model);
+  return windowLabel ? `${name} · ${windowLabel}` : name;
 }
