@@ -646,6 +646,9 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    // Upstream's global window. The fork keeps the field working so a
+    // settings.json written by stock and this fork stay interchangeable; a
+    // per-model entry below wins over it.
     autoCompactWindow: TrimmedString.check(
       Schema.isPattern(CLAUDE_AUTO_COMPACT_WINDOW_PATTERN),
     ).pipe(
@@ -653,12 +656,22 @@ export const ClaudeSettings = makeProviderSettingsSchema(
       Schema.annotateKey({
         title: "Auto-compact after",
         description:
-          "Compact after 100,000 to 1,000,000 tokens. Leave empty to use Claude's default. A custom model's own auto-compact window overrides this.",
+          "Compact after 100,000 to 1,000,000 tokens. Leave empty to use Claude's default. A per-model or custom-model window overrides this.",
         providerSettingsForm: {
           placeholder: "e.g. 300000",
           clearWhenEmpty: "omit",
         },
       }),
+    ),
+    // Fork addition, keyed by the model id the session runs as, so a
+    // context-window variant ("claude-opus-5-5[1m]") gets its own window
+    // without a custom model. Wins over the global window above.
+    autoCompactWindowByModel: Schema.Record(
+      TrimmedNonEmptyString,
+      TrimmedString.check(Schema.isPattern(CLAUDE_AUTO_COMPACT_WINDOW_PATTERN)),
+    ).pipe(
+      Schema.withDecodingDefault(Effect.succeed({})),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
   {
@@ -1308,6 +1321,12 @@ const ClaudeSettingsPatch = Schema.Struct({
   // schema error instead of a generic whole-settings failure.
   autoCompactWindow: Schema.optionalKey(
     TrimmedString.check(Schema.isPattern(CLAUDE_AUTO_COMPACT_WINDOW_PATTERN)),
+  ),
+  autoCompactWindowByModel: Schema.optionalKey(
+    Schema.Record(
+      TrimmedNonEmptyString,
+      TrimmedString.check(Schema.isPattern(CLAUDE_AUTO_COMPACT_WINDOW_PATTERN)),
+    ),
   ),
 });
 

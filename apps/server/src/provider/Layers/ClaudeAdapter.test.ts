@@ -491,8 +491,8 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("passes the configured auto-compaction window to Claude", () => {
-    const harness = makeHarness({ claudeConfig: { autoCompactWindow: "300000" } });
+  it.effect("offers only the resume dialog to Claude", () => {
+    const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
       yield* adapter.startSession({
@@ -501,192 +501,213 @@ describe("ClaudeAdapterLive", () => {
         runtimeMode: "full-access",
       });
 
-      const options = harness.getLastCreateQueryInput()?.options;
-      assert.deepEqual(options?.settings, { autoCompactWindow: 300000 });
-      assert.deepEqual(options?.supportedDialogKinds, ["resume_return"]);
+      assert.deepEqual(harness.getLastCreateQueryInput()?.options.supportedDialogKinds, [
+        "resume_return",
+      ]);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
     );
   });
 
-  it.effect("does not lower a model's native context window", () => {
-    const harness = makeHarness({ claudeConfig: { autoCompactWindow: "300000" } });
-    return Effect.gen(function* () {
-      const adapter = yield* ClaudeAdapter;
-      yield* adapter.startSession({
-        threadId: THREAD_ID,
-        provider: ProviderDriverKind.make("claudeAgent"),
-        // No explicit options: the fixture's default context window is the
-        // 1M "expanded" selection.
-        modelSelection: createModelSelection(
-          ProviderInstanceId.make("claudeAgent"),
-          SYNTHETIC_CLAUDE_CAPABLE_MODEL,
-          [],
-        ),
-        runtimeMode: "full-access",
-      });
+  describe("auto-compaction window", () => {
+    const windows = {
+      "glm-5.3-flash-or": "350000",
+      [`${SYNTHETIC_CLAUDE_CAPABLE_MODEL}[expanded]`]: "700000",
+    };
+    const settingsFor = (
+      model: string | undefined,
+      options: ReadonlyArray<{ id: string; value: string }> = [],
+      claudeConfig: Partial<ClaudeSettings> = {
+        autoCompactWindowByModel: windows,
+        customModels: ["glm-5.3-flash-or"],
+      },
+    ) => {
+      const harness = makeHarness({ claudeConfig });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          ...(model
+            ? {
+                modelSelection: createModelSelection(
+                  ProviderInstanceId.make("claudeAgent"),
+                  model,
+                  options,
+                ),
+              }
+            : {}),
+          runtimeMode: "full-access",
+        });
+        return harness.getLastCreateQueryInput()?.options.settings;
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    };
 
-      const options = harness.getLastCreateQueryInput()?.options;
-      assert.equal(options?.settings, undefined);
-    }).pipe(
-      Effect.provideService(Random.Random, makeDeterministicRandomService()),
-      Effect.provide(harness.layer),
+    it.effect("forwards the window set for a custom model", () =>
+      Effect.gen(function* () {
+        assert.deepEqual(yield* settingsFor("glm-5.3-flash-or"), { autoCompactWindow: 350000 });
+      }),
     );
-  });
 
-  it.effect("does not lower the window pinned by a context-window model suffix", () => {
-    const harness = makeHarness({ claudeConfig: { autoCompactWindow: "300000" } });
-    return Effect.gen(function* () {
-      const adapter = yield* ClaudeAdapter;
-      yield* adapter.startSession({
-        threadId: THREAD_ID,
-        provider: ProviderDriverKind.make("claudeAgent"),
+    it.effect("keys the window on the model id the session runs as", () =>
+      Effect.gen(function* () {
+        assert.deepEqual(
+          yield* settingsFor(SYNTHETIC_CLAUDE_CAPABLE_MODEL, [
+            { id: "contextWindow", value: "expanded" },
+          ]),
+          { autoCompactWindow: 700000 },
+        );
+        // The same model at its standard window runs as a different id.
+        assert.equal(
+          yield* settingsFor(SYNTHETIC_CLAUDE_CAPABLE_MODEL, [
+            { id: "contextWindow", value: "standard" },
+          ]),
+          undefined,
+        );
+      }),
+    );
+
+    it.effect("forwards nothing for a model without its own window", () =>
+      Effect.gen(function* () {
+        assert.equal(yield* settingsFor(SYNTHETIC_CLAUDE_STANDARD_MODEL), undefined);
+        assert.equal(yield* settingsFor(SYNTHETIC_CLAUDE_THINKING_MODEL), undefined);
+        assert.equal(yield* settingsFor(undefined), undefined);
+      }),
+    );
+
+    it.effect("reads a window set on the custom model entry", () =>
+      Effect.gen(function* () {
+        assert.deepEqual(
+          yield* settingsFor(SYNTHETIC_CLAUDE_CAPABLE_MODEL, [], {
+            customModels: [{ slug: SYNTHETIC_CLAUDE_CAPABLE_MODEL, autoCompactWindow: "700000" }],
+          }),
+          { autoCompactWindow: 700000 },
+        );
+      }),
+    );
+
+    it.effect("a per-model map entry wins over the global window", () =>
+      Effect.gen(function* () {
+        // 1M native window: the global 300000 alone would be dropped, so a
+        // forwarded 700000 proves the map entry won.
+        assert.deepEqual(
+          yield* settingsFor(
+            SYNTHETIC_CLAUDE_CAPABLE_MODEL,
+            [{ id: "contextWindow", value: "expanded" }],
+            { autoCompactWindow: "300000", autoCompactWindowByModel: windows },
+          ),
+          { autoCompactWindow: 700000 },
+        );
+      }),
+    );
+
+    it.effect("a per-model map entry wins over the custom model entry", () =>
+      Effect.gen(function* () {
+        assert.deepEqual(
+          yield* settingsFor("glm-5.3-flash-or", [], {
+            autoCompactWindowByModel: { "glm-5.3-flash-or": "350000" },
+            customModels: [{ slug: "glm-5.3-flash-or", autoCompactWindow: "700000" }],
+          }),
+          { autoCompactWindow: 350000 },
+        );
+      }),
+    );
+
+    it.effect("passes the configured global window to Claude", () =>
+      Effect.gen(function* () {
+        assert.deepEqual(yield* settingsFor(undefined, [], { autoCompactWindow: "300000" }), {
+          autoCompactWindow: 300000,
+        });
+      }),
+    );
+
+    it.effect("does not lower a model's native context window", () =>
+      Effect.gen(function* () {
+        // The fixture's default context window for this model is the 1M
+        // "expanded" selection.
+        assert.equal(
+          yield* settingsFor(SYNTHETIC_CLAUDE_CAPABLE_MODEL, [], { autoCompactWindow: "300000" }),
+          undefined,
+        );
+      }),
+    );
+
+    it.effect("does not lower the window pinned by a context-window model suffix", () =>
+      Effect.gen(function* () {
         // A custom passthrough slug carrying the fixture's "[expanded]"
         // suffix resolves no catalog window of its own.
-        modelSelection: createModelSelection(
-          ProviderInstanceId.make("claudeAgent"),
-          "claude-custom-passthrough[expanded]",
-          [],
-        ),
-        runtimeMode: "full-access",
-      });
-
-      const options = harness.getLastCreateQueryInput()?.options;
-      assert.equal(options?.settings, undefined);
-    }).pipe(
-      Effect.provideService(Random.Random, makeDeterministicRandomService()),
-      Effect.provide(harness.layer),
+        assert.equal(
+          yield* settingsFor("claude-custom-passthrough[expanded]", [], {
+            autoCompactWindow: "300000",
+          }),
+          undefined,
+        );
+      }),
     );
-  });
 
-  it.effect("keeps the configured window for models with an unknown context", () => {
-    const harness = makeHarness({ claudeConfig: { autoCompactWindow: "300000" } });
-    return Effect.gen(function* () {
-      const adapter = yield* ClaudeAdapter;
-      yield* adapter.startSession({
-        threadId: THREAD_ID,
-        provider: ProviderDriverKind.make("claudeAgent"),
-        modelSelection: createModelSelection(
-          ProviderInstanceId.make("claudeAgent"),
-          SYNTHETIC_CLAUDE_THINKING_MODEL,
-          [],
-        ),
-        runtimeMode: "full-access",
-      });
-
-      const options = harness.getLastCreateQueryInput()?.options;
-      assert.deepEqual(options?.settings, { autoCompactWindow: 300000 });
-    }).pipe(
-      Effect.provideService(Random.Random, makeDeterministicRandomService()),
-      Effect.provide(harness.layer),
+    it.effect("keeps the configured window for models with an unknown context", () =>
+      Effect.gen(function* () {
+        assert.deepEqual(
+          yield* settingsFor(SYNTHETIC_CLAUDE_THINKING_MODEL, [], { autoCompactWindow: "300000" }),
+          { autoCompactWindow: 300000 },
+        );
+      }),
     );
-  });
 
-  it.effect("keeps the configured window when it is not below the native window", () => {
-    const harness = makeHarness({ claudeConfig: { autoCompactWindow: "300000" } });
-    return Effect.gen(function* () {
-      const adapter = yield* ClaudeAdapter;
-      yield* adapter.startSession({
-        threadId: THREAD_ID,
-        provider: ProviderDriverKind.make("claudeAgent"),
-        modelSelection: createModelSelection(
-          ProviderInstanceId.make("claudeAgent"),
-          SYNTHETIC_CLAUDE_CAPABLE_MODEL,
-          [{ id: "contextWindow", value: "standard" }],
-        ),
-        runtimeMode: "full-access",
-      });
-
-      const options = harness.getLastCreateQueryInput()?.options;
-      assert.deepEqual(options?.settings, { autoCompactWindow: 300000 });
-    }).pipe(
-      Effect.provideService(Random.Random, makeDeterministicRandomService()),
-      Effect.provide(harness.layer),
+    it.effect("keeps the configured window when it is not below the native window", () =>
+      Effect.gen(function* () {
+        assert.deepEqual(
+          yield* settingsFor(
+            SYNTHETIC_CLAUDE_CAPABLE_MODEL,
+            [{ id: "contextWindow", value: "standard" }],
+            { autoCompactWindow: "300000" },
+          ),
+          { autoCompactWindow: 300000 },
+        );
+      }),
     );
-  });
 
-  it.effect("does not forward a global window below a 1M model's native window", () => {
-    const harness = makeHarness({ claudeConfig: { autoCompactWindow: "700000" } });
-    return Effect.gen(function* () {
-      const adapter = yield* ClaudeAdapter;
-      yield* adapter.startSession({
-        threadId: THREAD_ID,
-        provider: ProviderDriverKind.make("claudeAgent"),
-        // The fixture's default context window is the 1M "expanded" selection.
-        modelSelection: createModelSelection(
-          ProviderInstanceId.make("claudeAgent"),
-          SYNTHETIC_CLAUDE_CAPABLE_MODEL,
-          [],
-        ),
-        runtimeMode: "full-access",
-      });
-
-      const options = harness.getLastCreateQueryInput()?.options;
-      assert.equal(options?.settings, undefined);
-    }).pipe(
-      Effect.provideService(Random.Random, makeDeterministicRandomService()),
-      Effect.provide(harness.layer),
+    it.effect("does not forward a global window below a 1M model's native window", () =>
+      Effect.gen(function* () {
+        assert.equal(
+          yield* settingsFor(SYNTHETIC_CLAUDE_CAPABLE_MODEL, [], { autoCompactWindow: "700000" }),
+          undefined,
+        );
+      }),
     );
-  });
 
-  it.effect("forwards a per-model window even below the native window", () => {
-    const harness = makeHarness({
-      claudeConfig: {
-        autoCompactWindow: "300000",
-        customModels: [{ slug: SYNTHETIC_CLAUDE_CAPABLE_MODEL, autoCompactWindow: "700000" }],
-      },
-    });
-    return Effect.gen(function* () {
-      const adapter = yield* ClaudeAdapter;
-      yield* adapter.startSession({
-        threadId: THREAD_ID,
-        provider: ProviderDriverKind.make("claudeAgent"),
-        // 1M native window: the global 300000 alone would be dropped, so a
-        // forwarded 700000 proves the per-model entry won.
-        modelSelection: createModelSelection(
-          ProviderInstanceId.make("claudeAgent"),
-          SYNTHETIC_CLAUDE_CAPABLE_MODEL,
-          [],
-        ),
-        runtimeMode: "full-access",
-      });
-
-      const options = harness.getLastCreateQueryInput()?.options;
-      assert.deepEqual(options?.settings, { autoCompactWindow: 700000 });
-    }).pipe(
-      Effect.provideService(Random.Random, makeDeterministicRandomService()),
-      Effect.provide(harness.layer),
+    it.effect("forwards a custom-entry window even below the native window", () =>
+      Effect.gen(function* () {
+        assert.deepEqual(
+          yield* settingsFor(SYNTHETIC_CLAUDE_CAPABLE_MODEL, [], {
+            autoCompactWindow: "300000",
+            customModels: [{ slug: SYNTHETIC_CLAUDE_CAPABLE_MODEL, autoCompactWindow: "700000" }],
+          }),
+          { autoCompactWindow: 700000 },
+        );
+      }),
     );
-  });
 
-  it.effect("applies a per-model window only to its own model", () => {
-    const harness = makeHarness({
-      claudeConfig: {
-        autoCompactWindow: "300000",
-        customModels: [{ slug: SYNTHETIC_CLAUDE_CAPABLE_MODEL, autoCompactWindow: "700000" }],
-      },
-    });
-    return Effect.gen(function* () {
-      const adapter = yield* ClaudeAdapter;
-      yield* adapter.startSession({
-        threadId: THREAD_ID,
-        provider: ProviderDriverKind.make("claudeAgent"),
-        modelSelection: createModelSelection(
-          ProviderInstanceId.make("claudeAgent"),
-          SYNTHETIC_CLAUDE_STANDARD_MODEL,
-          [{ id: "contextWindow", value: "standard" }],
-        ),
-        runtimeMode: "full-access",
-      });
-
-      // The other model falls back to the global window under the
-      // does-not-lower rule, not the per-model 700000.
-      const options = harness.getLastCreateQueryInput()?.options;
-      assert.deepEqual(options?.settings, { autoCompactWindow: 300000 });
-    }).pipe(
-      Effect.provideService(Random.Random, makeDeterministicRandomService()),
-      Effect.provide(harness.layer),
+    it.effect("applies a custom-entry window only to its own model", () =>
+      Effect.gen(function* () {
+        // The other model falls back to the global window under the
+        // does-not-lower rule, not the per-model 700000.
+        assert.deepEqual(
+          yield* settingsFor(
+            SYNTHETIC_CLAUDE_STANDARD_MODEL,
+            [{ id: "contextWindow", value: "standard" }],
+            {
+              autoCompactWindow: "300000",
+              customModels: [{ slug: SYNTHETIC_CLAUDE_CAPABLE_MODEL, autoCompactWindow: "700000" }],
+            },
+          ),
+          { autoCompactWindow: 300000 },
+        );
+      }),
     );
   });
 

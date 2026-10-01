@@ -43,14 +43,33 @@ T3 Code uses the Claude configuration on the connected server.
 
 ## Compact long conversations
 
-Set **Auto-compact after** in the Claude provider settings to an integer between
-`100000` and `1000000`. For example, `300000` asks Claude to summarize at about
-300,000 tokens. This changes when compaction happens, not the model's context
-window. Leave it empty for Claude Code's default. A value below a model's context
-window is ignored for that model — the CLI compacts within the model's own
-window instead. To compact a large-window model earlier, set an **Auto-compact
-window** on that model's custom model entry in the instance's model list; a
-per-model window always applies.
+Compaction windows are integers between `100000` and `1000000` tokens: Claude
+summarizes the conversation at about that size. A window changes when
+compaction happens, not the model's context window. Set them per model; a model
+without one falls back to the provider's global window, then Claude Code's
+default.
+
+Set windows in `settings.json` under the Claude instance's
+`autoCompactWindowByModel`, keyed by the model id Claude runs, context-window
+suffix included. A custom model's id is its slug:
+
+```json
+"autoCompactWindowByModel": {
+  "glm-5.3-flash-or": "350000",
+  "claude-opus-5-5[1m]": "700000"
+}
+```
+
+Here Claude Opus 5.5 compacts at 700,000 tokens with the 1M context window and
+at Claude Code's default with 200k. A custom model entry can also carry its own
+**Auto-compact window** in the instance's model list. Priority: the per-model
+map, then the custom model entry, then the global window.
+
+The upstream **Auto-compact after** field in the Claude provider settings still
+works as the global fallback. The CLI compacts within the model's own context
+window, so a global value below a model's context window is ignored for that
+model rather than capping it — to compact a large-window model earlier, give
+that model a per-model or custom-entry window, which always applies.
 
 You can also send `/compact` in an existing conversation. Web and desktop offer
 **Compact context** from the context meter and may suggest it when you return to

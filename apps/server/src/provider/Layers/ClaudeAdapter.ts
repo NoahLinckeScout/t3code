@@ -4736,18 +4736,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         (launchArgSkipPermissions === null || launchArgSkipPermissions === "true"
           ? "bypassPermissions"
           : runtimeModeToPermission[input.runtimeMode]);
-      // The CLI clamps a settings window against the model's own context, so a
-      // small global value would cap every larger-window model: a 350k setting
-      // compacted 1M-context opus at ~318k while GLM routes escaped via router
-      // env. Forward the global window only when it does not lower the
+      // Priority: a window keyed by the model id the session runs as
+      // (context-window suffix included, so a 1M variant has its own entry),
+      // then the model's custom entry, then the global window. The CLI clamps
+      // a settings window against the model's own context, so a small global
+      // value would cap every larger-window model: a 350k setting compacted
+      // 1M-context opus at ~318k while GLM routes escaped via router env. The
+      // global window is therefore forwarded only when it does not lower the
       // model's native window; models with an unknown window (custom
-      // gateways) keep it, preserving their autocompact fallback. A window
-      // set on the selected model's custom entry wins and is always
-      // forwarded, even below the native window.
+      // gateways) keep it, preserving their autocompact fallback. A per-model
+      // or custom-entry window wins and is always forwarded, even below the
+      // native window.
+      const customAutoCompactWindow = readCustomModelEntries(yield* customModelsEffect).find(
+        (entry) => entry.slug === modelSelection?.model,
+      )?.autoCompactWindow;
+      // A bare-slug custom entry decodes with a null window; normalize every
+      // unset shape (null, empty) to undefined so only a real window counts.
       const perModelAutoCompactWindow =
-        readCustomModelEntries(yield* customModelsEffect).find(
-          (entry) => entry.slug === modelSelection?.model,
-        )?.autoCompactWindow ?? undefined;
+        (apiModelId ? claudeSettings.autoCompactWindowByModel[apiModelId] : undefined) ||
+        customAutoCompactWindow ||
+        undefined;
       const globalAutoCompactWindow = claudeSettings.autoCompactWindow
         ? Number(claudeSettings.autoCompactWindow)
         : undefined;
