@@ -174,6 +174,14 @@ const makeMigrationLoader = (throughId?: number) =>
  * upstream merge; the fork's migration re-applies under its own id 9000. The
  * exact name match keeps this a no-op on databases where upstream's 053 has
  * already run.
+ *
+ * The same databases may also carry an orphaned upstream 054 record: an
+ * intermediate fork build that kept the stale 053 slot and appended upstream's
+ * 054 ran 054 above it without ever applying 053. Once the stale slot is
+ * cleared, that record's insert would collide with its primary key and the
+ * migrator would refuse to start, so drop it too and let both migrations run
+ * in order — 053 creates its table if missing and 054 re-checks its column,
+ * so re-running them is safe.
  */
 const repairStaleForkMigration53 = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -182,6 +190,14 @@ const repairStaleForkMigration53 = Effect.gen(function* () {
     created_at datetime NOT NULL DEFAULT current_timestamp,
     name VARCHAR(255) NOT NULL
   )`;
+  yield* sql`DELETE FROM effect_sql_migrations
+    WHERE migration_id = 54
+      AND name = 'ProjectionThreadsAutoSettleDisabledAt'
+      AND EXISTS (
+        SELECT 1 FROM effect_sql_migrations AS stale
+        WHERE stale.migration_id = 53
+          AND stale.name = 'OrchestrationCommandReceiptsResultJson'
+      )`;
   yield* sql`DELETE FROM effect_sql_migrations
     WHERE migration_id = 53 AND name = 'OrchestrationCommandReceiptsResultJson'`;
 });

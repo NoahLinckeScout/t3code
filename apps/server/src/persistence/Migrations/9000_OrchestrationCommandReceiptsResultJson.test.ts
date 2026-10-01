@@ -38,11 +38,18 @@ layer("9000 fresh database", (it) => {
       yield* runMigrations();
 
       assert.include(yield* receiptColumns, "result_json");
-      // The upstream tracking table stops at upstream's own migrations; the
-      // fork's migration is recorded in its own table so a future upstream
-      // 053 is never skipped by the "above the highest id" rule.
+      // The upstream tracking table records only upstream's migrations
+      // (through this checkout's latest upstream base); the fork's migration
+      // is recorded in its own table so it never raises the upstream
+      // migrator's "latest applied id".
       const upstream = yield* upstreamRows;
-      assert.equal(Math.max(...upstream.map((row) => row.migration_id)), 52);
+      assert.deepEqual(
+        upstream.filter((row) => row.migration_id >= 53).map((row) => [row.migration_id, row.name]),
+        [
+          [53, "PullRequestFilesViewed"],
+          [54, "ProjectionThreadsAutoSettleDisabledAt"],
+        ],
+      );
       assert.deepEqual(
         (yield* forkRows).map((row) => [row.migration_id, row.name]),
         [[9000, "OrchestrationCommandReceiptsResultJson"]],
@@ -67,18 +74,79 @@ layer("9000 pre-renumbering database", (it) => {
 
       yield* runMigrations();
 
-      // The stale record is gone, so upstream's real 053 will run after the
-      // next upstream merge, and the fork's migration re-applied under 9000.
+      // The stale record is gone, so upstream's real 053 (and 054) run in
+      // this checkout, and the fork's migration re-applied under 9000.
       const upstream = yield* upstreamRows;
       assert.deepEqual(
-        upstream.filter((row) => row.migration_id === 53).map((row) => row.name),
-        [],
+        upstream.filter((row) => row.migration_id >= 53).map((row) => [row.migration_id, row.name]),
+        [
+          [53, "PullRequestFilesViewed"],
+          [54, "ProjectionThreadsAutoSettleDisabledAt"],
+        ],
       );
-      assert.equal(Math.max(...upstream.map((row) => row.migration_id)), 52);
       assert.deepEqual(
         (yield* forkRows).map((row) => [row.migration_id, row.name]),
         [[9000, "OrchestrationCommandReceiptsResultJson"]],
       );
+      assert.include(yield* receiptColumns, "result_json");
+
+      // Re-running settles on the same state.
+      yield* runMigrations();
+      assert.equal((yield* upstreamRows).length, upstream.length);
+      assert.equal((yield* forkRows).length, 1);
+    }),
+  );
+});
+
+layer("9000 naive upstream merge pollution", (it) => {
+  it.effect("repairs a database a naive merge binary recorded upstream 054 into", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+
+      // Shape of a database touched by an intermediate fork build that kept
+      // the stale 053 slot and appended upstream's 054 above it: 054's change
+      // applied and recorded, upstream's 053 never run, the fork's record
+      // still occupying the 53 slot, no fork tracking table.
+      yield* runMigrations({ toMigrationInclusive: 52 });
+      yield* sql`ALTER TABLE orchestration_command_receipts ADD COLUMN result_json TEXT`;
+      yield* sql`
+        INSERT INTO effect_sql_migrations (migration_id, name)
+        VALUES (53, 'OrchestrationCommandReceiptsResultJson')
+      `;
+      yield* sql`ALTER TABLE projection_threads ADD COLUMN auto_settle_disabled_at TEXT`;
+      yield* sql`
+        INSERT INTO effect_sql_migrations (migration_id, name)
+        VALUES (54, 'ProjectionThreadsAutoSettleDisabledAt')
+      `;
+
+      yield* runMigrations();
+
+      // Both stale records are gone and upstream's real migrations ran in
+      // order — 053's table now exists, 054 re-applies as a no-op — and the
+      // fork's migration is recorded in its own table.
+      const upstream = yield* upstreamRows;
+      assert.deepEqual(
+        upstream
+          .filter((row) => row.migration_id === 53 || row.migration_id === 54)
+          .map((row) => [row.migration_id, row.name]),
+        [
+          [53, "PullRequestFilesViewed"],
+          [54, "ProjectionThreadsAutoSettleDisabledAt"],
+        ],
+      );
+      assert.deepEqual(
+        (yield* forkRows).map((row) => [row.migration_id, row.name]),
+        [[9000, "OrchestrationCommandReceiptsResultJson"]],
+      );
+      const tables = yield* SqlClient.SqlClient.pipe(
+        Effect.flatMap(
+          (sql) =>
+            sql<{ readonly name: string }>`
+            SELECT name FROM sqlite_master WHERE name = 'pull_request_files_viewed'
+          `,
+        ),
+      );
+      assert.equal(tables.length, 1);
       assert.include(yield* receiptColumns, "result_json");
 
       // Re-running settles on the same state.
