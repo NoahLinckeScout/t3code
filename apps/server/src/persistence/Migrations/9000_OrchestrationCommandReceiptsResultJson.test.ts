@@ -30,8 +30,10 @@ const forkRows = Effect.gen(function* () {
   `;
 });
 
-layer("9000_OrchestrationCommandReceiptsResultJson", (it) => {
-  it.effect("adds the result column to a fresh database in the fork range", () =>
+// One layer suite per database so each starts from a fresh in-memory state.
+
+layer("9000 fresh database", (it) => {
+  it.effect("adds the result column and records the fork migration in its range", () =>
     Effect.gen(function* () {
       yield* runMigrations();
 
@@ -47,7 +49,9 @@ layer("9000_OrchestrationCommandReceiptsResultJson", (it) => {
       );
     }),
   );
+});
 
+layer("9000 pre-renumbering database", (it) => {
   it.effect("repairs a database that recorded the fork migration as id 53", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
