@@ -220,27 +220,62 @@ describe("readCustomModelEntries", () => {
         42,
       ]),
     ).toEqual([
-      { slug: "bare", name: "bare", capabilities: null },
-      { slug: "named", name: "Named", capabilities },
+      { slug: "bare", name: "bare", capabilities: null, autoCompactWindow: null },
+      { slug: "named", name: "Named", capabilities, autoCompactWindow: null },
     ]);
   });
 
   it("drops unparseable capabilities but keeps the entry", () => {
     expect(
       readCustomModelEntries([{ slug: "x", capabilities: { optionDescriptors: "nope" } }]),
-    ).toEqual([{ slug: "x", name: "x", capabilities: null }]);
+    ).toEqual([{ slug: "x", name: "x", capabilities: null, autoCompactWindow: null }]);
     expect(readCustomModelEntries("not a list")).toEqual([]);
   });
 
-  it("writes the compact stored shape back", () => {
-    expect(toCustomModelSetting({ slug: "x", name: "x", capabilities: null })).toBe("x");
+  it("resolves an in-range autoCompactWindow and drops malformed ones", () => {
     expect(
-      toCustomModelSetting({ slug: "x", name: "x", capabilities: { optionDescriptors: [] } }),
+      readCustomModelEntries([
+        { slug: "ok", autoCompactWindow: " 700000 " },
+        { slug: "empty", autoCompactWindow: "" },
+        { slug: "low", autoCompactWindow: "99999" },
+        { slug: "high", autoCompactWindow: "1000001" },
+        { slug: "type", autoCompactWindow: 700000 },
+      ]),
+    ).toEqual([
+      { slug: "ok", name: "ok", capabilities: null, autoCompactWindow: "700000" },
+      { slug: "empty", name: "empty", capabilities: null, autoCompactWindow: null },
+      { slug: "low", name: "low", capabilities: null, autoCompactWindow: null },
+      { slug: "high", name: "high", capabilities: null, autoCompactWindow: null },
+      { slug: "type", name: "type", capabilities: null, autoCompactWindow: null },
+    ]);
+  });
+
+  it("writes the compact stored shape back", () => {
+    expect(
+      toCustomModelSetting({ slug: "x", name: "x", capabilities: null, autoCompactWindow: null }),
     ).toBe("x");
-    expect(toCustomModelSetting({ slug: "x", name: "X", capabilities })).toEqual({
+    expect(
+      toCustomModelSetting({
+        slug: "x",
+        name: "x",
+        capabilities: { optionDescriptors: [] },
+        autoCompactWindow: null,
+      }),
+    ).toBe("x");
+    expect(
+      toCustomModelSetting({ slug: "x", name: "X", capabilities, autoCompactWindow: null }),
+    ).toEqual({
       slug: "x",
       name: "X",
       capabilities,
     });
+    expect(
+      toCustomModelSetting({
+        slug: "x",
+        name: "x",
+        capabilities: null,
+        autoCompactWindow: "700000",
+      }),
+    ).toEqual({ slug: "x", autoCompactWindow: "700000" });
   });
 });

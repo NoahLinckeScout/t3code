@@ -1,4 +1,5 @@
 import {
+  CLAUDE_AUTO_COMPACT_WINDOW_PATTERN,
   type ModelCapabilities,
   ProviderDriverKind,
   type ProviderOptionDescriptor,
@@ -28,6 +29,7 @@ export interface EditorDescriptor {
 export interface CustomModelDraft {
   readonly slug: string;
   readonly name: string;
+  readonly autoCompactWindow: string;
   readonly descriptors: ReadonlyArray<EditorDescriptor>;
 }
 
@@ -174,6 +176,7 @@ export function draftFromDefinition(entry: CustomModelDefinition): CustomModelDr
   return {
     slug: entry.slug,
     name: entry.name === entry.slug ? "" : entry.name,
+    autoCompactWindow: entry.autoCompactWindow ?? "",
     descriptors: (entry.capabilities?.optionDescriptors ?? []).map(descriptorToEditor),
   };
 }
@@ -193,6 +196,10 @@ export function descriptorsFromCapabilities(
  * order so the message is actionable, or `null` when the draft is sound.
  */
 export function validateDraft(draft: CustomModelDraft): string | null {
+  const autoCompactWindow = draft.autoCompactWindow.trim();
+  if (autoCompactWindow !== "" && !CLAUDE_AUTO_COMPACT_WINDOW_PATTERN.test(autoCompactWindow)) {
+    return "Auto-compact window must be an integer from 100000 to 1000000, or empty.";
+  }
   const seenIds = new Set<string>();
   for (const [index, descriptor] of draft.descriptors.entries()) {
     const position = `Option ${index + 1}`;
@@ -249,10 +256,12 @@ export function definitionFromDraft(draft: CustomModelDraft): CustomModelDefinit
     };
   });
   const name = draft.name.trim();
+  const autoCompactWindow = draft.autoCompactWindow.trim();
   return {
     slug: draft.slug,
     name: name || draft.slug,
     capabilities:
       descriptors.length > 0 ? createModelCapabilities({ optionDescriptors: descriptors }) : null,
+    autoCompactWindow: autoCompactWindow || null,
   };
 }

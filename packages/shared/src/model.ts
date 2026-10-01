@@ -1,4 +1,5 @@
 import {
+  CLAUDE_AUTO_COMPACT_WINDOW_PATTERN,
   type CustomModelSetting,
   MODEL_SLUG_ALIASES_BY_PROVIDER,
   ModelCapabilities,
@@ -260,6 +261,8 @@ export interface CustomModelDefinition {
   readonly slug: string;
   readonly name: string;
   readonly capabilities: ModelCapabilities | null;
+  /** Claude per-model auto-compact window in tokens, or `null` when unset. */
+  readonly autoCompactWindow: string | null;
 }
 
 const decodeCustomModelCapabilities = Schema.decodeUnknownOption(ModelCapabilities);
@@ -280,7 +283,12 @@ export function readCustomModelEntries(value: unknown): CustomModelDefinition[] 
       typeof raw === "string"
         ? { slug: raw }
         : raw !== null && typeof raw === "object"
-          ? (raw as { slug?: unknown; name?: unknown; capabilities?: unknown })
+          ? (raw as {
+              slug?: unknown;
+              name?: unknown;
+              capabilities?: unknown;
+              autoCompactWindow?: unknown;
+            })
           : null;
     if (!record) continue;
     const slug = normalizeCustomModelSlug(typeof record.slug === "string" ? record.slug : null);
@@ -292,12 +300,18 @@ export function readCustomModelEntries(value: unknown): CustomModelDefinition[] 
       record.capabilities === undefined || record.capabilities === null
         ? null
         : Option.getOrNull(decodeCustomModelCapabilities(record.capabilities));
+    const autoCompactWindow =
+      typeof record.autoCompactWindow === "string" ? record.autoCompactWindow.trim() : "";
     entries.push({
       slug,
       name,
       capabilities: capabilities
         ? createModelCapabilities({ optionDescriptors: capabilities.optionDescriptors ?? [] })
         : null,
+      autoCompactWindow:
+        autoCompactWindow !== "" && CLAUDE_AUTO_COMPACT_WINDOW_PATTERN.test(autoCompactWindow)
+          ? autoCompactWindow
+          : null,
     });
   }
   return entries;
@@ -310,10 +324,12 @@ export function readCustomModelEntries(value: unknown): CustomModelDefinition[] 
 export function toCustomModelSetting(entry: CustomModelDefinition): CustomModelSetting {
   const descriptors = entry.capabilities?.optionDescriptors ?? [];
   const name = entry.name !== entry.slug ? entry.name : undefined;
-  if (!name && descriptors.length === 0) return entry.slug;
+  const autoCompactWindow = entry.autoCompactWindow ?? "";
+  if (!name && descriptors.length === 0 && !autoCompactWindow) return entry.slug;
   return {
     slug: entry.slug,
     ...(name ? { name } : {}),
+    ...(autoCompactWindow ? { autoCompactWindow } : {}),
     ...(descriptors.length > 0
       ? { capabilities: createModelCapabilities({ optionDescriptors: descriptors }) }
       : {}),

@@ -13,6 +13,7 @@ import { UsageLimitSourceId } from "./usageLimitSourceId.ts";
 import { EnvironmentMachineKind, ThreadEnvMode } from "./environment.ts";
 import { KeybindingShortcut } from "./keybindings.ts";
 import {
+  CLAUDE_AUTO_COMPACT_WINDOW_PATTERN,
   CustomModelSetting,
   DEFAULT_TEXT_GENERATION_MODEL,
   DEFAULT_TEXT_GENERATION_REASONING_EFFORT,
@@ -608,11 +609,6 @@ export const CodexSettings = makeProviderSettingsSchema(
 );
 export type CodexSettings = typeof CodexSettings.Type;
 
-// Empty, or an integer from 100,000 to 1,000,000. Shared by the full
-// Claude settings schema and its patch so an out-of-range value fails at
-// the update that introduced it.
-const CLAUDE_AUTO_COMPACT_WINDOW_PATTERN = /^(?:|[1-9]\d{5}|1000000)$/;
-
 export const ClaudeSettings = makeProviderSettingsSchema(
   {
     enabled: Schema.Boolean.pipe(
@@ -657,7 +653,7 @@ export const ClaudeSettings = makeProviderSettingsSchema(
       Schema.annotateKey({
         title: "Auto-compact after",
         description:
-          "Compact after 100,000 to 1,000,000 tokens. Leave empty to use Claude's default.",
+          "Compact after 100,000 to 1,000,000 tokens. Leave empty to use Claude's default. A custom model's own auto-compact window overrides this.",
         providerSettingsForm: {
           placeholder: "e.g. 300000",
           clearWhenEmpty: "omit",
