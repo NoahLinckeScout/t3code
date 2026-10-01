@@ -7,7 +7,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it } from "@effect/vitest";
 
 import { claudeConfigDeltaSparesSessions, resolveLiveClaudeSettings } from "./ClaudeDriver.ts";
 
@@ -84,85 +84,97 @@ describe("resolveLiveClaudeSettings", () => {
   const fallback = claudeSettings({ customModels: ["fallback-model"] });
 
   const run = (settings: ServerSettings, instanceId = claudeAgentId) =>
-    Effect.runPromise(resolveLiveClaudeSettings({ settings, instanceId, fallback }));
+    resolveLiveClaudeSettings({ settings, instanceId, fallback });
 
-  it("decodes the explicit providerInstances entry", async () => {
-    const settings = {
-      ...emptySettings,
-      providerInstances: {
-        [claudeAgentId]: claudeInstanceEntry(claudeSettings({ customModels: ["c8"] })),
-      },
-    } as ServerSettings;
-    const resolved = await run(settings);
-    expect(resolved.customModels).toEqual(["c8"]);
-  });
-
-  it("falls back when the explicit entry fails to decode", async () => {
-    const settings = {
-      ...emptySettings,
-      providerInstances: {
-        [claudeAgentId]: claudeInstanceEntry({ ...claudeSettings({}), customModels: "oops" }),
-      },
-    } as ServerSettings;
-    const resolved = await run(settings);
-    expect(resolved).toEqual(fallback);
-  });
-
-  it("applies the envelope enabled flag to the decoded settings", async () => {
-    // A normalized explicit instance carries `enabled` on the envelope with
-    // the flag stripped from `config`; the decoded settings alone would
-    // report the schema default and probe a disabled instance.
-    const settings = {
-      ...emptySettings,
-      providerInstances: {
-        [claudeAgentId]: {
-          driver: ProviderDriverKind.make("claudeAgent"),
-          enabled: false,
-          config: claudeSettings({ enabled: true, customModels: ["c8"] }),
+  it.effect("decodes the explicit providerInstances entry", () =>
+    Effect.gen(function* () {
+      const settings = {
+        ...emptySettings,
+        providerInstances: {
+          [claudeAgentId]: claudeInstanceEntry(claudeSettings({ customModels: ["c8"] })),
         },
-      },
-    } as ServerSettings;
-    const resolved = await run(settings);
-    expect(resolved.enabled).toBe(false);
-    expect(resolved.customModels).toEqual(["c8"]);
-  });
+      } as ServerSettings;
+      const resolved = yield* run(settings);
+      expect(resolved.customModels).toEqual(["c8"]);
+    }),
+  );
 
-  it("keeps a config-level disable winning over an envelope enable", async () => {
-    const settings = {
-      ...emptySettings,
-      providerInstances: {
-        [claudeAgentId]: {
-          driver: ProviderDriverKind.make("claudeAgent"),
-          enabled: true,
-          config: claudeSettings({ enabled: false }),
+  it.effect("falls back when the explicit entry fails to decode", () =>
+    Effect.gen(function* () {
+      const settings = {
+        ...emptySettings,
+        providerInstances: {
+          [claudeAgentId]: claudeInstanceEntry({ ...claudeSettings({}), customModels: "oops" }),
         },
-      },
-    } as ServerSettings;
-    const resolved = await run(settings);
-    expect(resolved.enabled).toBe(false);
-  });
+      } as ServerSettings;
+      const resolved = yield* run(settings);
+      expect(resolved).toEqual(fallback);
+    }),
+  );
 
-  it("reads the legacy providers mirror for the default instance id", async () => {
-    const settings = {
-      ...emptySettings,
-      providers: {
-        ...emptySettings.providers,
-        claudeAgent: claudeSettings({ customModels: ["legacy-model"] }),
-      },
-    } as ServerSettings;
-    const resolved = await run(settings);
-    expect(resolved.customModels).toEqual(["legacy-model"]);
-  });
+  it.effect("applies the envelope enabled flag to the decoded settings", () =>
+    Effect.gen(function* () {
+      // A normalized explicit instance carries `enabled` on the envelope with
+      // the flag stripped from `config`; the decoded settings alone would
+      // report the schema default and probe a disabled instance.
+      const settings = {
+        ...emptySettings,
+        providerInstances: {
+          [claudeAgentId]: {
+            driver: ProviderDriverKind.make("claudeAgent"),
+            enabled: false,
+            config: claudeSettings({ enabled: true, customModels: ["c8"] }),
+          },
+        },
+      } as ServerSettings;
+      const resolved = yield* run(settings);
+      expect(resolved.enabled).toBe(false);
+      expect(resolved.customModels).toEqual(["c8"]);
+    }),
+  );
 
-  it("falls back for a non-default instance id with no explicit entry", async () => {
-    const settings = {
-      ...emptySettings,
-      providers: {
-        ...emptySettings.providers,
-        claudeAgent: claudeSettings({ customModels: ["legacy-model"] }),
-      },
-    } as ServerSettings;
-    const resolved = await run(settings, "claude_secondary" as typeof claudeAgentId);
-    expect(resolved).toEqual(fallback);
-  });
+  it.effect("keeps a config-level disable winning over an envelope enable", () =>
+    Effect.gen(function* () {
+      const settings = {
+        ...emptySettings,
+        providerInstances: {
+          [claudeAgentId]: {
+            driver: ProviderDriverKind.make("claudeAgent"),
+            enabled: true,
+            config: claudeSettings({ enabled: false }),
+          },
+        },
+      } as ServerSettings;
+      const resolved = yield* run(settings);
+      expect(resolved.enabled).toBe(false);
+    }),
+  );
+
+  it.effect("reads the legacy providers mirror for the default instance id", () =>
+    Effect.gen(function* () {
+      const settings = {
+        ...emptySettings,
+        providers: {
+          ...emptySettings.providers,
+          claudeAgent: claudeSettings({ customModels: ["legacy-model"] }),
+        },
+      } as ServerSettings;
+      const resolved = yield* run(settings);
+      expect(resolved.customModels).toEqual(["legacy-model"]);
+    }),
+  );
+
+  it.effect("falls back for a non-default instance id with no explicit entry", () =>
+    Effect.gen(function* () {
+      const settings = {
+        ...emptySettings,
+        providers: {
+          ...emptySettings.providers,
+          claudeAgent: claudeSettings({ customModels: ["legacy-model"] }),
+        },
+      } as ServerSettings;
+      const resolved = yield* run(settings, "claude_secondary" as typeof claudeAgentId);
+      expect(resolved).toEqual(fallback);
+    }),
+  );
 });
