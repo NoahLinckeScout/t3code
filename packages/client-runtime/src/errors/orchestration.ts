@@ -14,3 +14,12 @@ export function wasBootstrapThreadNotCreated(error: unknown): boolean {
     isOrchestrationDispatchCommandError(error) && error.bootstrapThreadDisposition === "not-created"
   );
 }
+
+/**
+ * The server refused the command's model selection: the named Claude instance
+ * does not list the model. Retrying cannot succeed — the payload itself needs
+ * correcting.
+ */
+export function isUnknownModelSelectionError(error: unknown): boolean {
+  return isOrchestrationDispatchCommandError(error) && error.reason === "unknown_model";
+}

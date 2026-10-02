@@ -1508,4 +1508,33 @@ describe("thread outbox", () => {
       }),
     ).toBe("restore");
   });
+
+  // A custom model removed elsewhere before reconnection makes every retry of
+  // the metadata sync fail the same way; the queued message would block the
+  // thread's outbox forever.
+  it("restores a queued message whose model the server rejects as unknown", () => {
+    const unknownModelRejection = new OrchestrationDispatchCommandError({
+      message:
+        "Provider instance 'claudeAgent' has no model 'glm-5.3-flash-or'. Add it to that instance's customModels or pick a listed model.",
+      reason: "unknown_model",
+    });
+
+    expect(
+      resolveThreadOutboxFailureAction({
+        stage: "settings-sync",
+        error: unknownModelRejection,
+        interrupted: false,
+      }),
+    ).toBe("restore");
+
+    // A dispatch error without the reason can be transient (a clone in
+    // progress) and keeps the queued message.
+    expect(
+      resolveThreadOutboxFailureAction({
+        stage: "settings-sync",
+        error: new OrchestrationDispatchCommandError({ message: "A clone is in progress" }),
+        interrupted: false,
+      }),
+    ).toBe("retry");
+  });
 });

@@ -19,9 +19,10 @@ import {
   requireEnvironmentScope,
 } from "../auth/http.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
-import { findUnknownModelSelection } from "./modelAvailability.ts";
+import { claudeCustomModelsByInstance, findUnknownModelSelection } from "./modelAvailability.ts";
 
 export const orchestrationHttpApiLayer = HttpApiBuilder.group(
   EnvironmentHttpApi,
@@ -31,6 +32,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
     const clientCommandDispatch = yield* ClientOrchestrationCommandDispatch;
     const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
     const providerRegistry = yield* ProviderRegistry;
+    const serverSettings = yield* ServerSettings.ServerSettingsService;
 
     return handlers
       .handle(
@@ -113,6 +115,11 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
           const unknownModel = findUnknownModelSelection(
             args.payload,
             yield* providerRegistry.getProviders,
+            // The registry snapshot trails a just-saved customModels edit;
+            // the settings themselves are current.
+            claudeCustomModelsByInstance(
+              yield* serverSettings.getSettings.pipe(Effect.orElseSucceed(() => null)),
+            ),
           );
           if (unknownModel !== null) {
             return yield* failEnvironmentInvalidRequest("unknown_model", unknownModel);

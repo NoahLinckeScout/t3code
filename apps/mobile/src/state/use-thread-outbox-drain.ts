@@ -787,6 +787,18 @@ export function useThreadOutboxDrain(): void {
         );
       }
       const { reportFailure } = makeDeliveryHelpers(queuedMessage);
+      // Settings-sync failures normally stay queued (the next attempt settles
+      // races and transient rejections), but a permanent rejection — an
+      // unknown-model selection — restores for correction instead.
+      const failSettingsSync = async (
+        commandResult: AtomCommandResult<unknown, unknown>,
+      ): Promise<boolean> => {
+        const failure = reportFailure(commandResult, "settings-sync");
+        if (failure?.action === "restore") {
+          return restoreQueuedMessage(queuedMessage, failure.message);
+        }
+        return false;
+      };
 
       if (!modelSelectionsEqual(settings.modelSelection, thread.modelSelection)) {
         const updateResult = await updateThreadMetadata({
@@ -798,8 +810,7 @@ export function useThreadOutboxDrain(): void {
           },
         });
         if (AsyncResult.isFailure(updateResult)) {
-          reportFailure(updateResult, "settings-sync");
-          return false;
+          return failSettingsSync(updateResult);
         }
       }
 
@@ -814,8 +825,7 @@ export function useThreadOutboxDrain(): void {
           },
         });
         if (AsyncResult.isFailure(runtimeResult)) {
-          reportFailure(runtimeResult, "settings-sync");
-          return false;
+          return failSettingsSync(runtimeResult);
         }
       }
 
@@ -830,8 +840,7 @@ export function useThreadOutboxDrain(): void {
           },
         });
         if (AsyncResult.isFailure(interactionResult)) {
-          reportFailure(interactionResult, "settings-sync");
-          return false;
+          return failSettingsSync(interactionResult);
         }
       }
 
