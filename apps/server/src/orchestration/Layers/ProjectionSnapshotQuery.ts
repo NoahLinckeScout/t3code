@@ -3349,23 +3349,25 @@ pending_approval_requests AS (
     });
 
   const getThreadRuntimeContext: ProjectionSnapshotQueryShape["getThreadRuntimeContext"] =
-    Effect.fn("ProjectionSnapshotQuery.getThreadRuntimeContext")(function* (threadId) {
-      const context = yield* getThreadRuntimeContextRow({ threadId }).pipe(
-        Effect.mapError(
-          toPersistenceSqlOrDecodeError(
-            "ProjectionSnapshotQuery.getThreadRuntimeContext:query",
-            "ProjectionSnapshotQuery.getThreadRuntimeContext:decodeRow",
+    Effect.fn("ProjectionSnapshotQuery.getThreadRuntimeContext", { level: "Debug" })(
+      function* (threadId) {
+        const context = yield* getThreadRuntimeContextRow({ threadId }).pipe(
+          Effect.mapError(
+            toPersistenceSqlOrDecodeError(
+              "ProjectionSnapshotQuery.getThreadRuntimeContext:query",
+              "ProjectionSnapshotQuery.getThreadRuntimeContext:decodeRow",
+            ),
           ),
-        ),
-      );
-      return Option.map(context, (row) => ({
-        id: row.id,
-        projectId: row.projectId,
-        title: row.title,
-        titleState: row.titleState,
-        session: row.session === null ? null : mapSessionRow(row.session),
-      }));
-    });
+        );
+        return Option.map(context, (row) => ({
+          id: row.id,
+          projectId: row.projectId,
+          title: row.title,
+          titleState: row.titleState,
+          session: row.session === null ? null : mapSessionRow(row.session),
+        }));
+      },
+    );
 
   const getTurnStartMessage: ProjectionSnapshotQueryShape["getTurnStartMessage"] = Effect.fn(
     "ProjectionSnapshotQuery.getTurnStartMessage",

@@ -2222,7 +2222,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     };
   });
 
-  const updateResumeCursor = Effect.fn("updateResumeCursor")(function* (
+  const updateResumeCursor = Effect.fn("updateResumeCursor", { level: "Debug" })(function* (
     context: ClaudeSessionContext,
   ) {
     const threadId = context.session.threadId;
@@ -2422,41 +2422,43 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
   });
 
-  const emitReasoningSummaryDelta = Effect.fn("emitReasoningSummaryDelta")(function* (
-    context: ClaudeSessionContext,
-    input: {
-      readonly delta: string;
-      readonly contentIndex?: number;
-      readonly rawMethod: string;
-      readonly rawPayload: SDKMessage;
+  const emitReasoningSummaryDelta = Effect.fn("emitReasoningSummaryDelta", { level: "Debug" })(
+    function* (
+      context: ClaudeSessionContext,
+      input: {
+        readonly delta: string;
+        readonly contentIndex?: number;
+        readonly rawMethod: string;
+        readonly rawPayload: SDKMessage;
+      },
+    ) {
+      const turnState = context.turnState;
+      if (!turnState || input.delta.length === 0) {
+        return;
+      }
+      turnState.emittedThinkingText = true;
+      const stamp = yield* makeEventStamp();
+      yield* offerRuntimeEvent({
+        type: "content.delta",
+        eventId: stamp.eventId,
+        provider: PROVIDER,
+        createdAt: stamp.createdAt,
+        threadId: context.session.threadId,
+        turnId: turnState.turnId,
+        payload: {
+          streamKind: "reasoning_summary_text",
+          delta: input.delta,
+          ...(input.contentIndex !== undefined ? { contentIndex: input.contentIndex } : {}),
+        },
+        providerRefs: nativeProviderRefs(context),
+        raw: {
+          source: "claude.sdk.message",
+          method: input.rawMethod,
+          payload: input.rawPayload,
+        },
+      });
     },
-  ) {
-    const turnState = context.turnState;
-    if (!turnState || input.delta.length === 0) {
-      return;
-    }
-    turnState.emittedThinkingText = true;
-    const stamp = yield* makeEventStamp();
-    yield* offerRuntimeEvent({
-      type: "content.delta",
-      eventId: stamp.eventId,
-      provider: PROVIDER,
-      createdAt: stamp.createdAt,
-      threadId: context.session.threadId,
-      turnId: turnState.turnId,
-      payload: {
-        streamKind: "reasoning_summary_text",
-        delta: input.delta,
-        ...(input.contentIndex !== undefined ? { contentIndex: input.contentIndex } : {}),
-      },
-      providerRefs: nativeProviderRefs(context),
-      raw: {
-        source: "claude.sdk.message",
-        method: input.rawMethod,
-        payload: input.rawPayload,
-      },
-    });
-  });
+  );
 
   const backfillThinkingFromSnapshot = Effect.fn("backfillThinkingFromSnapshot")(function* (
     context: ClaudeSessionContext,
@@ -2486,7 +2488,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     turnState.emittedThinkingText = false;
   });
 
-  const ensureThreadId = Effect.fn("ensureThreadId")(function* (
+  const ensureThreadId = Effect.fn("ensureThreadId", { level: "Debug" })(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
   ) {
@@ -2891,7 +2893,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* updateResumeCursor(context);
   });
 
-  const handleStreamEvent = Effect.fn("handleStreamEvent")(function* (
+  const handleStreamEvent = Effect.fn("handleStreamEvent", { level: "Debug" })(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
   ) {
@@ -3612,7 +3614,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
   });
 
-  const handleSystemMessage = Effect.fn("handleSystemMessage")(function* (
+  const handleSystemMessage = Effect.fn("handleSystemMessage", { level: "Debug" })(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
   ) {
@@ -4175,7 +4177,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
   });
 
-  const handleSdkMessage = Effect.fn("handleSdkMessage")(function* (
+  // Per-SDK-delta bookkeeping spans are pure volume on busy servers (hundreds of
+  // messages/second across live agents); Debug keeps them out of the default Info
+  // trace while staying available for debugging.
+  const handleSdkMessage = Effect.fn("handleSdkMessage", { level: "Debug" })(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
   ) {

@@ -1129,13 +1129,13 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const resolveThreadRuntimeContext = Effect.fn("resolveThreadRuntimeContext")(function* (
-    threadId: ThreadId,
-  ) {
-    return yield* projectionSnapshotQuery
-      .getThreadRuntimeContext(threadId)
-      .pipe(Effect.map(Option.getOrUndefined));
-  });
+  const resolveThreadRuntimeContext = Effect.fn("resolveThreadRuntimeContext", { level: "Debug" })(
+    function* (threadId: ThreadId) {
+      return yield* projectionSnapshotQuery
+        .getThreadRuntimeContext(threadId)
+        .pipe(Effect.map(Option.getOrUndefined));
+    },
+  );
 
   const getThreadMessageById = Effect.fn("getThreadMessageById")(function* (
     threadId: ThreadId,
