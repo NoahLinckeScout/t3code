@@ -377,6 +377,10 @@ export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: Trac
     durationMs: 0,
   };
 
+  // Writes go through sink.writeAsync so a contended disk can't stall the event
+  // loop; a rejected append re-queues its records ahead of newer ones for the
+  // next flush, and flush() awaits the sink's in-flight chain so close and the
+  // periodic drain stay durable.
   const flushUnsafe = () => {
     if (buffer.length === 0) {
       return;
@@ -385,9 +389,14 @@ export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: Trac
     const records = buffer;
     buffer = [];
     let persistedCount = 0;
+    // Bytes of the record that broke the previous chunk, already encoded; it
+    // becomes the first record of the next chunk, so skip the re-encode.
+    let carriedBytes = -1;
 
     while (persistedCount < records.length) {
-      const firstRecordBytes = textEncoder.encode(records[persistedCount]).byteLength;
+      const firstRecordBytes =
+        carriedBytes >= 0 ? carriedBytes : textEncoder.encode(records[persistedCount]).byteLength;
+      carriedBytes = -1;
       if (firstRecordBytes > options.maxBytes) {
         persistedCount += 1;
         continue;
@@ -397,19 +406,24 @@ export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: Trac
       let chunkBytes = firstRecordBytes;
       while (nextIndex < records.length) {
         const nextRecordBytes = textEncoder.encode(records[nextIndex]).byteLength;
-        if (chunkBytes + nextRecordBytes > options.maxBytes) break;
+        if (chunkBytes + nextRecordBytes > options.maxBytes) {
+          carriedBytes = nextRecordBytes;
+          break;
+        }
         chunkBytes += nextRecordBytes;
         nextIndex += 1;
       }
 
       const chunk = records.slice(persistedCount, nextIndex).join("");
       const startedAt = performance.now();
-      try {
-        sink.write(chunk);
-      } catch {
-        buffer.unshift(...records.slice(persistedCount));
-        return;
-      }
+      const failedFrom = persistedCount;
+      const failedTo = nextIndex;
+      void sink.writeAsync(chunk).then(
+        () => undefined,
+        () => {
+          buffer.unshift(...records.slice(failedFrom, failedTo));
+        },
+      );
       pendingFlushStats = {
         logicalWriteBytes: pendingFlushStats.logicalWriteBytes + chunkBytes,
         count: pendingFlushStats.count + nextIndex - persistedCount,
@@ -429,6 +443,9 @@ export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: Trac
     };
     return stats;
   }).pipe(
+    // The write chain never rejects (writeAsync reports failures to its own
+    // caller), so awaiting it here only extends the flush, never fails it.
+    Effect.flatMap((stats) => Effect.promise(() => sink.flushAsync()).pipe(Effect.as(stats))),
     Effect.flatMap((stats) =>
       stats.count > 0 && options.onFlush ? options.onFlush(stats).pipe(Effect.ignore) : Effect.void,
     ),

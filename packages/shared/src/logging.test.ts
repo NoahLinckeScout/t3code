@@ -95,6 +95,50 @@ describe("RotatingFileSink", () => {
     expect(NodeFS.readFileSync(filePath, "utf8")).toBe("entry");
   });
 
+  it("appends asynchronously in call order", async () => {
+    const directory = makeTempDirectory();
+    const filePath = NodePath.join(directory, "log.ndjson");
+    const sink = new RotatingFileSink({ filePath, maxBytes: 1000, maxFiles: 2 });
+
+    const writes = [sink.writeAsync("one\n"), sink.writeAsync("two\n"), sink.writeAsync("three\n")];
+    await Promise.all(writes);
+
+    expect(NodeFS.readFileSync(filePath, "utf8")).toBe("one\ntwo\nthree\n");
+  });
+
+  it("rotates asynchronously when the file would exceed maxBytes", async () => {
+    const directory = makeTempDirectory();
+    const filePath = NodePath.join(directory, "log.ndjson");
+    const sink = new RotatingFileSink({ filePath, maxBytes: 4, maxFiles: 2 });
+
+    await sink.writeAsync("aaaa");
+    await sink.writeAsync("bb");
+
+    expect(NodeFS.readFileSync(filePath, "utf8")).toBe("bb");
+    expect(NodeFS.readFileSync(`${filePath}.1`, "utf8")).toBe("aaaa");
+  });
+
+  it("rejects async write failures when throwOnError is set", async () => {
+    const directory = makeTempDirectory();
+    const filePath = NodePath.join(directory, "log.ndjson");
+    NodeFS.mkdirSync(filePath);
+    const sink = new RotatingFileSink({
+      filePath,
+      maxBytes: Number.MAX_SAFE_INTEGER,
+      maxFiles: 1,
+      throwOnError: true,
+    });
+
+    const thrown = await sink.writeAsync("entry").then(
+      () => undefined,
+      (cause: unknown) => cause,
+    );
+
+    expect(thrown).toBeInstanceOf(RotatingFileSinkError);
+    expect(thrown).toMatchObject({ operation: "write", filePath });
+    expect((thrown as RotatingFileSinkError).cause).toMatchObject({ code: "EISDIR" });
+  });
+
   it("preserves write failures", () => {
     const directory = makeTempDirectory();
     const filePath = NodePath.join(directory, "log.ndjson");
