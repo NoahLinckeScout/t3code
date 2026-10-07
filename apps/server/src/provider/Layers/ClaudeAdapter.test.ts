@@ -36,6 +36,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import * as Tracer from "effect/Tracer";
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
@@ -1460,6 +1461,68 @@ describe("ClaudeAdapterLive", () => {
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps stream-delta spans out of an Info trace but keeps turn lifecycle spans", () => {
+    const harness = makeHarness();
+    const recorded: Array<{ readonly name: string; readonly sampled: boolean }> = [];
+    const recordingTracer = Tracer.make({
+      span: (options) => {
+        recorded.push({ name: options.name, sampled: options.sampled });
+        return new Tracer.NativeSpan(options);
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 7).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: SYNTHETIC_CLAUDE_STANDARD_MODEL,
+        },
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "hello", attachments: [] });
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-1",
+        uuid: "stream-1",
+        parent_tool_use_id: null,
+        event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hi" } },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "assistant",
+        session_id: "sdk-session-1",
+        uuid: "assistant-1",
+        parent_tool_use_id: null,
+        message: { id: "assistant-message-1", content: [{ type: "text", text: "Hi" }] },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "sdk-session-1",
+        uuid: "result-1",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(runtimeEventsFiber);
+
+      const sampled = new Set(recorded.filter((span) => span.sampled).map((span) => span.name));
+      const seen = new Set(recorded.map((span) => span.name));
+      assert.isTrue(seen.has("handleStreamEvent"));
+      assert.isFalse(sampled.has("handleStreamEvent"));
+      assert.isTrue(sampled.has("handleAssistantMessage"));
+      assert.isTrue(sampled.has("handleResultMessage"));
+    }).pipe(
+      Effect.provide(harness.layer),
+      Effect.provideService(Tracer.Tracer, recordingTracer),
+      Effect.provideService(Tracer.MinimumTraceLevel, "Info"),
     );
   });
 

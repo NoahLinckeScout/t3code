@@ -4177,10 +4177,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
   });
 
-  // Per-SDK-delta bookkeeping spans are pure volume on busy servers (hundreds of
-  // messages/second across live agents); Debug keeps them out of the default Info
-  // trace while staying available for debugging.
-  const handleSdkMessage = Effect.fn("handleSdkMessage", { level: "Debug" })(function* (
+  // Untraced: a pure dispatcher whose span was per-message volume; the
+  // per-delta handlers below it are Debug, the turn-lifecycle handlers stay
+  // Info.
+  const handleSdkMessage = Effect.fnUntraced(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
   ) {
